@@ -30,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libs2-0 \
     zlib1g libbz2-1.0 libexpat1 liblz4-1 \
     curl ca-certificates \
+    osmctools osmium-tool \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder-cpp /src/build/build-index /usr/local/bin/
