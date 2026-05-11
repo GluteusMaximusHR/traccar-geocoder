@@ -50,6 +50,14 @@ docker run -e PBF_URLS="https://download.geofabrik.de/europe-latest.osm.pbf" \
 # Serve only (from pre-built index)
 docker run -v geocoder-data:/data -p 3000:3000 traccar/traccar-geocoder serve
 
+# Apply OSM replication diffs and rebuild the index (in-place, one-shot)
+docker run -v geocoder-data:/data traccar/traccar-geocoder update
+
+# Auto mode with periodic incremental updates (refresh weekly)
+docker run -e PBF_URLS="https://download.geofabrik.de/europe-latest.osm.pbf" \
+  -e UPDATE_INTERVAL=7d \
+  -v geocoder-data:/data -p 3000:3000 traccar/traccar-geocoder
+
 # Multiple PBF files
 docker run -e PBF_URLS="https://download.geofabrik.de/europe/france-latest.osm.pbf https://download.geofabrik.de/europe/germany-latest.osm.pbf" \
   -v geocoder-data:/data -p 3000:3000 traccar/traccar-geocoder
@@ -215,6 +223,22 @@ cargo build --release --manifest-path server/Cargo.toml
 | `BIND_ADDR` | HTTP bind address | `0.0.0.0:3000` |
 | `DATA_DIR` | Data directory for PBF files and index | `/data` |
 | `CACHE_DIR` | ACME certificate cache directory | `acme-cache` |
+| `UPDATE_INTERVAL` | When set in `auto` mode, schedules a recurring incremental update (`30d`, `7d`, `24h`, `60m`, `300s`). | (unset) |
+| `UPDATE_MAX_DIFF_AGE` | Passed to `osmupdate --max-merge` (days). PBFs older than this fall back to a fresh download. | `7` |
+| `STAGING_DIR` | Where the new index is built before the atomic swap. | `$DATA_DIR/index.staging` |
+| `STATE_DIR` | Per-PBF replication state files. | `$DATA_DIR/state` |
+| `FORCE_REDOWNLOAD` | Re-download every PBF on next launch (overrides the basename cache). | (unset) |
+| `CHECK_PBF_FRESHNESS` | Use `curl -z` to refresh only if the server's Last-Modified is newer. | (unset) |
+| `REPLICATION_BASE_URL_<basename>` | Per-PBF replication URL override for PBFs lacking the `osmosis_replication_base_url` header (non-alphanumerics in the basename become underscores). | (unset) |
+| `ENABLE_SANITISE` | Run `osmconvert --drop-broken-refs` on the merged PBF before rebuild. Off by default. | (unset) |
+
+## Incremental updates
+
+See [docs/incremental-updates.md](docs/incremental-updates.md) for the full
+guide. In short: instead of `rm`-ing the PBF and re-downloading multi-GB
+files, run the container in `update` mode (or set `UPDATE_INTERVAL` in `auto`
+mode) to apply OSM replication diffs to the cached PBF, rebuild into a
+staging directory, and atomically swap.
 
 ## License
 
