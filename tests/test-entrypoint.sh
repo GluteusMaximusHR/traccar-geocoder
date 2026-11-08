@@ -47,6 +47,8 @@ files="geo_cells admin_cells strings"
 for f in $files; do
     echo "built-from: $* at $(date +%s%N)" > "$out/$f.bin"
 done
+[ "${STUB_BUILD_EMPTY:-0}" = "1" ] && : > "$out/geo_cells.bin"
+exit 0
 EOF
 cat > "$STUBS/mv" <<'EOF'
 #!/bin/sh
@@ -54,6 +56,19 @@ case "$*" in
     *geocoder.json*) [ "${STUB_MV_DB_FAIL:-0}" = "1" ] && exit 1 ;;
 esac
 exec /bin/mv "$@"
+EOF
+cat > "$STUBS/cp" <<'EOF'
+#!/bin/sh
+case "$*" in
+    *geocoder.json*) [ "${STUB_CP_DB_FAIL:-0}" = "1" ] && exit 1 ;;
+esac
+exec /bin/cp "$@"
+EOF
+cat > "$STUBS/df" <<'EOF'
+#!/bin/sh
+# STUB_DF_AVAIL=<bytes> fakes the free space the entrypoint sees.
+if [ -n "${STUB_DF_AVAIL:-}" ]; then printf 'Avail\n%s\n' "$STUB_DF_AVAIL"; exit 0; fi
+exec /bin/df "$@"
 EOF
 cat > "$STUBS/query-server" <<'EOF'
 #!/bin/sh
@@ -334,28 +349,43 @@ echo "# 16. serve: the server gets DATA_DIR and appends /index itself"
 new_data; run_ep serve STUB_SERVER_DIE=1
 check "serve passes DATA_DIR" stub_called_with "^query-server pid=[0-9]* $DATA 0.0.0.0:3000"
 
-echo "# 17. geocoder.json migrates out of the index dir before any swap"
+echo "# 17. geocoder.json leaves the index dir at swap time (copy) or when this image serves (move)"
 new_data; legacy_db; run_ep update STUB_OSMUPDATE_RC=0
 check "update+swap: exit 0" [ "$RC" = 0 ]
-check "update+swap: moved to DATA_DIR" file_is "$DATA/geocoder.json" "$DB"
-check "update+swap: not left in index" [ ! -f "$DATA/index/geocoder.json" ]
-check "update+swap: not left in index.old" [ ! -f "$DATA/index.old/geocoder.json" ]
+check "update+swap: copied to DATA_DIR" file_is "$DATA/geocoder.json" "$DB"
+check "update+swap: not in the new index" [ ! -f "$DATA/index/geocoder.json" ]
+check "update+swap: original went to index.old (for rollback)" file_is "$DATA/index.old/geocoder.json" "$DB"
 check "update+swap: logged" grep_log "Migrating geocoder.json"
 new_data; legacy_db; run_ep update
-check "no-op update migrates" file_is "$DATA/geocoder.json" "$DB"
+check "no-op update: exit 0" [ "$RC" = 0 ]
+check "no-op update leaves the db where the old server reads it" file_is "$DATA/index/geocoder.json" "$DB"
+check "no-op update: nothing copied yet" [ ! -f "$DATA/geocoder.json" ]
 new_data; legacy_db; run_ep build
-check "build migrates" file_is "$DATA/geocoder.json" "$DB"
+check "build with a current index does not touch the db" file_is "$DATA/index/geocoder.json" "$DB"
 new_data; legacy_db; run_ep serve STUB_SERVER_DIE=1
-check "serve migrates" file_is "$DATA/geocoder.json" "$DB"
-new_data; legacy_db; echo newer > "$DATA/geocoder.json"; run_ep build
+check "serve moves it" file_is "$DATA/geocoder.json" "$DB"
+check "serve: gone from index" [ ! -f "$DATA/index/geocoder.json" ]
+new_data; legacy_db; run_ep auto STUB_SERVER_DIE=1 UPDATE_INTERVAL=30
+check "auto with interval moves it before launching the server" file_is "$DATA/geocoder.json" "$DB"
+new_data; legacy_db; echo newer > "$DATA/geocoder.json"; run_ep serve STUB_SERVER_DIE=1
 check "existing DATA_DIR db is not overwritten" file_is "$DATA/geocoder.json" newer
+check "differing copies are reported" grep_log "differ; the server uses"
 new_data; legacy_db; mv "$DATA/index" "$DATA/index.old"; run_ep update
-check "interrupted swap: restored, then migrated" file_is "$DATA/geocoder.json" "$DB"
-new_data; legacy_db; run_ep update STUB_OSMUPDATE_RC=0 STUB_MV_DB_FAIL=1
-check "failed migration: exit 2" [ "$RC" = 2 ]
-check "failed migration: db still in place" file_is "$DATA/index/geocoder.json" "$DB"
-check "failed migration: no swap" [ ! -d "$DATA/index.old" ]
-check "failed migration: osmupdate not called" not stub_called_with osmupdate
+check "interrupted swap: restored with its db" file_is "$DATA/index/geocoder.json" "$DB"
+new_data; legacy_db; run_ep update STUB_OSMUPDATE_RC=0 STUB_CP_DB_FAIL=1
+check "failed copy: exit 2" [ "$RC" = 2 ]
+check "failed copy: db still in place" file_is "$DATA/index/geocoder.json" "$DB"
+check "failed copy: no swap" [ ! -d "$DATA/index.old" ]
+check "failed copy: live index untouched" file_is "$DATA/index/geo_cells.bin" "old-index"
+check "failed copy: finished build kept" [ -f "$DATA/index.staging/.complete" ]
+check "failed copy: marker set" [ -f "$DATA/state/rebuild-pending" ]
+run_ep update
+check "failed copy: next cycle completes" [ "$RC" = 0 ]
+check "failed copy: next cycle swapped" not file_is "$DATA/index/geo_cells.bin" "old-index"
+new_data; legacy_db; run_ep serve STUB_SERVER_DIE=1 STUB_MV_DB_FAIL=1
+check "failed move at serve: exit 2" [ "$RC" = 2 ]
+check "failed move at serve: db still in place" file_is "$DATA/index/geocoder.json" "$DB"
+check "failed move at serve: server not started" not stub_called_with query-server
 
 echo "# 18. INDEX_ALL_ROADS reaches every build path"
 new_data; run_ep update STUB_OSMUPDATE_RC=0 INDEX_ALL_ROADS=true
@@ -383,7 +413,7 @@ check "auto: rebuilt before the server starts" [ "$(head -1 "$STUB_LOG" | cut -d
 new_data; old_format; legacy_db; run_ep build STUB_BUILD_FAIL=1
 check "failed rebuild: exit 2" [ "$RC" = 2 ]
 check "failed rebuild: old index kept live" file_is "$DATA/index/geo_cells.bin" "old-index"
-check "failed rebuild: db migrated" file_is "$DATA/geocoder.json" "$DB"
+check "failed rebuild: db stays with the old index" file_is "$DATA/index/geocoder.json" "$DB"
 new_data; run_ep update STUB_OSMUPDATE_RC=0 STUB_BUILD_NO_PLACE=1
 check "incomplete build: exit 2" [ "$RC" = 2 ]
 check "incomplete build: not swapped" file_is "$DATA/index/geo_cells.bin" "old-index"
@@ -400,6 +430,52 @@ echo finished > "$DATA/index.staging/geo_cells.bin"; echo finished > "$DATA/inde
 run_ep build
 check "finished staging: promoted" grep_log "promoting it"
 check "finished staging: live" file_is "$DATA/index/geo_cells.bin" finished
+new_data without-index; mkdir "$DATA/index.old" "$DATA/index.staging"
+echo "old-index" > "$DATA/index.old/geo_cells.bin"; echo "old-index" > "$DATA/index.old/place_cells.bin"
+echo finished > "$DATA/index.staging/geo_cells.bin"; echo finished > "$DATA/index.staging/place_cells.bin"
+: > "$DATA/index.staging/.complete"
+run_ep build
+check "staging beats index.old: promoted" grep_log "promoting it"
+check "staging beats index.old: newest index live" file_is "$DATA/index/geo_cells.bin" finished
+check "staging beats index.old: not rebuilt" not stub_called_with build-index
+
+echo "# 21. only one build at a time per staging dir"
+if command -v flock >/dev/null 2>&1; then
+    new_data without-index
+    # The holder must be a single process (exec, no child), so killing it
+    # really releases the lock.
+    ( exec 8>"$DATA/index.staging.lock"; flock 8; exec sleep 20 ) &
+    HOLDER=$!
+    sleep 0.3
+    run_ep build
+    check "lock held: exit 2" [ "$RC" = 2 ]
+    check "lock held: refused" grep_log "another build is already running"
+    check "lock held: build-index not called" not stub_called_with build-index
+    kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+    run_ep build
+    check "lock released: builds" [ "$RC" = 0 ]
+    check "lock released: index in place" [ -f "$DATA/index/geo_cells.bin" ]
+    run_ep update STUB_OSMUPDATE_RC=0
+    check "lock released after a swap: next update works" [ "$RC" = 0 ]
+else
+    echo "  skip flock not installed"
+fi
+
+echo "# 22. disk-space preflight and truncated output"
+new_data; run_ep update STUB_OSMUPDATE_RC=0 STUB_DF_AVAIL=1
+check "no space: exit 2" [ "$RC" = 2 ]
+check "no space: explained" grep_log "Free disk space or set SKIP_DISK_CHECK=1"
+check "no space: build-index not called" not stub_called_with build-index
+check "no space: live index untouched" file_is "$DATA/index/geo_cells.bin" "old-index"
+check "no space: marker set for retry" [ -f "$DATA/state/rebuild-pending" ]
+run_ep update STUB_DF_AVAIL=1 SKIP_DISK_CHECK=1
+check "SKIP_DISK_CHECK=1: exit 0" [ "$RC" = 0 ]
+check "SKIP_DISK_CHECK=1: rebuilt" not file_is "$DATA/index/geo_cells.bin" "old-index"
+new_data; run_ep update STUB_OSMUPDATE_RC=0 STUB_BUILD_EMPTY=1
+check "empty geo_cells.bin: exit 2" [ "$RC" = 2 ]
+check "empty geo_cells.bin: explained" grep_log "is empty; build-index probably ran out of disk space"
+check "empty geo_cells.bin: not swapped" file_is "$DATA/index/geo_cells.bin" "old-index"
+check "empty geo_cells.bin: staging removed" [ ! -d "$DATA/index.staging" ]
 
 echo
 echo "$CHECKS checks, $FAILS failed"
