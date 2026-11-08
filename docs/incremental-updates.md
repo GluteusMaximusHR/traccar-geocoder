@@ -64,8 +64,8 @@ the real name.
      if a file that had ways now has none.
    - Replace the PBF, set the `rebuild-pending` marker, write the state file.
 2. If any PBF changed, or the marker is set from an earlier failed rebuild,
-   or there is no index yet: build into `$STAGING_DIR`, copy
-   `index/geocoder.json` (users and API keys) into it, then
+   or there is no index yet, or the index is in an older format: build into
+   `$STAGING_DIR`, then
    `mv index index.old && mv index.staging index`. If the second rename
    fails, the first is rolled back. The marker is cleared only after a
    successful swap, so a build that dies (OOM, `docker stop`, disk full)
@@ -167,10 +167,44 @@ docker compose run --rm geocoder-updater && docker compose restart geocoder
 ```
 
 Restarting is safe at any time: the server is stateless apart from
-`geocoder.json`, which the swap carries over.
+`$DATA_DIR/geocoder.json` (users and API keys), which lives outside the index
+directory and is not touched by the swap.
 
 (A future revision may add SIGHUP-driven graceful reload in the server itself
 so the restart step disappears. For now, restart-on-update is the contract.)
+
+## Upgrading from an older image
+
+The index format changed: `place_cells.bin` was added and node counts widened
+to 16 bits. The new server cannot load an index built by an older builder, so
+`build`, `auto` and `update` detect a missing `place_cells.bin` and rebuild
+once. `geocoder.json` moves from `index/` to `$DATA_DIR` at the same time.
+
+**In `auto` mode the server is down during that first rebuild** (hours for
+Europe), because it cannot serve the old index in the meantime. To keep the
+outage to a restart, build first with a one-off container while the old one
+keeps serving, and switch immediately afterwards:
+
+```sh
+docker run --rm -v geocoder-data:/data -e PBF_URLS="$PBF_URLS" <new-image> build
+docker stop geocoder && docker rm geocoder   # then start the new image
+```
+
+Until the switch, do not change users or API keys, and do not let the old
+container restart: it can no longer find its `geocoder.json` or read the new
+index.
+
+Rolling back to the old image needs both the old index and the database back
+in their old places:
+
+```sh
+mv /data/index /data/index.new && mv /data/index.old /data/index
+mv /data/geocoder.json /data/index/geocoder.json
+```
+
+Only a missing `place_cells.bin` is detected. An index built by an upstream
+image from between May and October 2026 has that file but the old node
+counts; force its rebuild with `touch /data/state/rebuild-pending`.
 
 ## Caveats
 

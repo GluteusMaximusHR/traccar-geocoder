@@ -76,6 +76,21 @@ list_pbfs() {
     done
 }
 
+# place_cells.bin is absent from indexes built before the server started
+# requiring it; those fail to load and must be rebuilt.
+index_is_current() {
+    [ -f "$1/geo_cells.bin" ] && [ -f "$1/place_cells.bin" ]
+}
+
+# Older versions kept users/API keys inside the index directory, where the
+# next swap would move them away and a later one delete them.
+migrate_geocoder_db() {
+    if [ ! -f "$DATA_DIR/geocoder.json" ] && [ -f "$DATA_DIR/index/geocoder.json" ]; then
+        echo "Migrating geocoder.json out of index folder..."
+        mv "$DATA_DIR/index/geocoder.json" "$DATA_DIR/geocoder.json"
+    fi
+}
+
 build_index_into() {
     target_dir="$1"
     files=$(list_pbfs)
@@ -88,11 +103,12 @@ build_index_into() {
     level_args=""
     [ -n "$STREET_LEVEL" ] && level_args="$level_args --street-level $STREET_LEVEL"
     [ -n "$ADMIN_LEVEL" ] && level_args="$level_args --admin-level $ADMIN_LEVEL"
+    [ "$INDEX_ALL_ROADS" = "true" ] && level_args="$level_args --all-roads"
     echo "Building index into $target_dir..."
     # shellcheck disable=SC2086
     build-index "$target_dir" $files $level_args || return 1
-    if [ ! -f "$target_dir/geo_cells.bin" ]; then
-        echo "Error: build-index finished but $target_dir/geo_cells.bin is missing" >&2
+    if ! index_is_current "$target_dir"; then
+        echo "Error: build-index finished but the index in $target_dir is incomplete" >&2
         return 1
     fi
 }
@@ -107,14 +123,6 @@ rebuild_and_swap() {
         echo "Index build failed; keeping the current index" >&2
         rm -rf "$STAGING_DIR"
         return 2
-    fi
-
-    # The server keeps its users/API keys in geocoder.json inside the
-    # index directory it was started with. A freshly built staging dir
-    # does not have it, so carry it over or every update logs everyone
-    # out and invalidates every key.
-    if [ -f "$DATA_DIR/index/geocoder.json" ]; then
-        cp -p "$DATA_DIR/index/geocoder.json" "$STAGING_DIR/geocoder.json" || return 2
     fi
 
     # The previous index dir is kept as index.old so a running server
@@ -151,12 +159,15 @@ recover_index() {
 
 build_index() {
     recover_index
-    if [ -f "$DATA_DIR/index/geo_cells.bin" ] && [ ! -f "$REBUILD_MARKER" ]; then
+    migrate_geocoder_db || return 2
+    if index_is_current "$DATA_DIR/index" && [ ! -f "$REBUILD_MARKER" ]; then
         echo "Index already exists, skipping build"
         return 0
     fi
     if [ -f "$REBUILD_MARKER" ]; then
         echo "PBF data changed since the index was built; rebuilding"
+    elif [ -f "$DATA_DIR/index/geo_cells.bin" ]; then
+        echo "Index was built by an older version and cannot be loaded; rebuilding"
     fi
     rebuild_and_swap || return $?
     echo "Index built."
@@ -379,6 +390,7 @@ do_update() {
         download_pbf
     fi
     recover_index
+    migrate_geocoder_db || { echo "Update aborted" >&2; return 2; }
 
     # `|| pbf_rc=$?` keeps errexit happy on non-zero return without us
     # having to toggle set +e / set -e. Use a distinct variable name so
@@ -393,6 +405,8 @@ do_update() {
                 echo "All PBFs current, but a previous rebuild did not complete; rebuilding"
             elif [ ! -f "$DATA_DIR/index/geo_cells.bin" ]; then
                 echo "All PBFs current, but there is no index yet; building"
+            elif ! index_is_current "$DATA_DIR/index"; then
+                echo "All PBFs current, but the index was built by an older version; rebuilding"
             else
                 echo "All PBFs current; no rebuild needed"
                 echo "=== Update cycle complete (no-op) ==="
@@ -410,7 +424,7 @@ do_update() {
 }
 
 build_server_args() {
-    args="$DATA_DIR/index"
+    args="$DATA_DIR"
     if [ -n "$DOMAIN" ]; then
         args="$args --domain $DOMAIN"
         [ -n "$CACHE_DIR" ] && args="$args --cache $CACHE_DIR"
@@ -424,6 +438,7 @@ build_server_args() {
 }
 
 serve() {
+    migrate_geocoder_db
     args=$(build_server_args)
     echo "Starting server..."
     # shellcheck disable=SC2086

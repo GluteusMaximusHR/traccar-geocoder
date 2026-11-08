@@ -42,9 +42,18 @@ echo "build-index $*" >> "$STUB_LOG"
 [ "${STUB_BUILD_FAIL:-0}" = "1" ] && { echo "stub build failure" >&2; exit 1; }
 out="$1"; shift
 mkdir -p "$out"
-for f in geo_cells admin_cells strings; do
+files="geo_cells admin_cells strings"
+[ "${STUB_BUILD_NO_PLACE:-0}" = "1" ] || files="$files place_cells"
+for f in $files; do
     echo "built-from: $* at $(date +%s%N)" > "$out/$f.bin"
 done
+EOF
+cat > "$STUBS/mv" <<'EOF'
+#!/bin/sh
+case "$*" in
+    *geocoder.json*) [ "${STUB_MV_DB_FAIL:-0}" = "1" ] && exit 1 ;;
+esac
+exec /bin/mv "$@"
 EOF
 cat > "$STUBS/query-server" <<'EOF'
 #!/bin/sh
@@ -123,6 +132,9 @@ chmod +x "$STUBS"/*
 export PATH="$STUBS:$PATH"
 
 # -------------------------------------------------------------- helpers
+DB='{"users":{"admin":{}}}'
+legacy_db() { mv "$DATA/geocoder.json" "$DATA/index/geocoder.json"; }
+old_format() { rm "$DATA/index/place_cells.bin"; }
 new_data() { # fresh DATA_DIR with one PBF and (optionally) an index + geocoder.json
     DATA="$WORK/data-$RANDOM$RANDOM"
     rm -rf "$DATA"; mkdir -p "$DATA/pbf"
@@ -130,7 +142,8 @@ new_data() { # fresh DATA_DIR with one PBF and (optionally) an index + geocoder.
     if [ "${1:-with-index}" = "with-index" ]; then
         mkdir -p "$DATA/index"
         echo "old-index" > "$DATA/index/geo_cells.bin"
-        echo '{"users":{"admin":{}}}' > "$DATA/index/geocoder.json"
+        echo "old-index" > "$DATA/index/place_cells.bin"
+        echo "$DB" > "$DATA/geocoder.json"
     fi
     export DATA_DIR="$DATA"
     export STUB_LOG="$DATA/stub.log"; : > "$STUB_LOG"
@@ -162,7 +175,8 @@ check "exit 0" [ "$RC" = 0 ]
 check "pbf replaced (ways 10 -> 11)" [ "$(pbf_ways)" = 11 ]
 check "index rebuilt" not file_is "$DATA/index/geo_cells.bin" "old-index"
 check "old index kept as index.old" file_is "$DATA/index.old/geo_cells.bin" "old-index"
-check "geocoder.json carried into new index" file_is "$DATA/index/geocoder.json" '{"users":{"admin":{}}}'
+check "geocoder.json untouched by the swap" file_is "$DATA/geocoder.json" "$DB"
+check "no geocoder.json in the new index" [ ! -f "$DATA/index/geocoder.json" ]
 check "state: base url remembered" [ "$(state replication_base_url)" = "https://example.test/updates" ]
 check "state: sequence from state.txt" [ "$(state sequence_number)" = 4961 ]
 check "state: timestamp" [ "$(state last_update_timestamp)" = "2026-11-07T21:21:36Z" ]
@@ -180,7 +194,7 @@ echo "# 3. update: build fails after PBF was replaced -> live index kept, retrie
 new_data; run_ep update STUB_OSMUPDATE_RC=0 STUB_BUILD_FAIL=1
 check "exit 2" [ "$RC" = 2 ]
 check "live index untouched" file_is "$DATA/index/geo_cells.bin" "old-index"
-check "geocoder.json untouched" [ -f "$DATA/index/geocoder.json" ]
+check "geocoder.json untouched" file_is "$DATA/geocoder.json" "$DB"
 check "no index.old created" [ ! -d "$DATA/index.old" ]
 check "staging removed" [ ! -d "$DATA/index.staging" ]
 check "pbf is ahead (ways=11)" [ "$(pbf_ways)" = 11 ]
@@ -284,7 +298,7 @@ sleep 3
 kill -TERM "$EP"; wait "$EP" 2>/dev/null
 check "restart logged" grep_log "Restarting server against new index"
 check "server launched twice" [ "$(grep -c '^query-server pid=' "$STUB_LOG")" -ge 2 ]
-check "geocoder.json survived the swap" [ -f "$DATA/index/geocoder.json" ]
+check "geocoder.json survived the swap" file_is "$DATA/geocoder.json" "$DB"
 
 echo "# 13. auto loop: server death ends the container with the server's status"
 new_data
@@ -295,6 +309,7 @@ wait "$EP"; RC=$?
 check "exited within 15s" [ "$i" -lt 30 ]
 check "exit status 3 (server's)" [ "$RC" = 3 ]
 check "logged" grep_log "Server exited unexpectedly (status 3)"
+check "auto loop passes DATA_DIR to the server" stub_called_with "^query-server pid=[0-9]* $DATA 0.0.0.0:3000"
 
 echo "# 14. auto loop: invalid UPDATE_INTERVAL is rejected"
 for bad in 1w abc 0 7D 3h0; do
@@ -314,6 +329,64 @@ check "bare 42" [ "$(its 42)" = 42 ]
 check "1w -> empty" [ -z "$(its 1w)" ]
 check "abc -> empty" [ -z "$(its abc)" ]
 check "m -> empty" [ -z "$(its m)" ]
+
+echo "# 16. serve: the server gets DATA_DIR and appends /index itself"
+new_data; run_ep serve STUB_SERVER_DIE=1
+check "serve passes DATA_DIR" stub_called_with "^query-server pid=[0-9]* $DATA 0.0.0.0:3000"
+
+echo "# 17. geocoder.json migrates out of the index dir before any swap"
+new_data; legacy_db; run_ep update STUB_OSMUPDATE_RC=0
+check "update+swap: exit 0" [ "$RC" = 0 ]
+check "update+swap: moved to DATA_DIR" file_is "$DATA/geocoder.json" "$DB"
+check "update+swap: not left in index" [ ! -f "$DATA/index/geocoder.json" ]
+check "update+swap: not left in index.old" [ ! -f "$DATA/index.old/geocoder.json" ]
+check "update+swap: logged" grep_log "Migrating geocoder.json"
+new_data; legacy_db; run_ep update
+check "no-op update migrates" file_is "$DATA/geocoder.json" "$DB"
+new_data; legacy_db; run_ep build
+check "build migrates" file_is "$DATA/geocoder.json" "$DB"
+new_data; legacy_db; run_ep serve STUB_SERVER_DIE=1
+check "serve migrates" file_is "$DATA/geocoder.json" "$DB"
+new_data; legacy_db; echo newer > "$DATA/geocoder.json"; run_ep build
+check "existing DATA_DIR db is not overwritten" file_is "$DATA/geocoder.json" newer
+new_data; legacy_db; mv "$DATA/index" "$DATA/index.old"; run_ep update
+check "interrupted swap: restored, then migrated" file_is "$DATA/geocoder.json" "$DB"
+new_data; legacy_db; run_ep update STUB_OSMUPDATE_RC=0 STUB_MV_DB_FAIL=1
+check "failed migration: exit 2" [ "$RC" = 2 ]
+check "failed migration: db still in place" file_is "$DATA/index/geocoder.json" "$DB"
+check "failed migration: no swap" [ ! -d "$DATA/index.old" ]
+check "failed migration: osmupdate not called" not stub_called_with osmupdate
+
+echo "# 18. INDEX_ALL_ROADS reaches every build path"
+new_data; run_ep update STUB_OSMUPDATE_RC=0 INDEX_ALL_ROADS=true
+check "update passes --all-roads" stub_called_with "^build-index .*--all-roads"
+new_data without-index; run_ep build INDEX_ALL_ROADS=true
+check "build passes --all-roads" stub_called_with "^build-index .*--all-roads"
+new_data; run_ep update STUB_OSMUPDATE_RC=0
+check "unset -> no --all-roads" not stub_called_with "--all-roads"
+
+echo "# 19. an index in the old format is rebuilt once"
+new_data; old_format; legacy_db; run_ep build
+check "build: exit 0" [ "$RC" = 0 ]
+check "build: logs reason" grep_log "built by an older version"
+check "build: new format in place" [ -f "$DATA/index/place_cells.bin" ]
+check "build: old index kept as index.old" file_is "$DATA/index.old/geo_cells.bin" "old-index"
+check "build: db migrated" file_is "$DATA/geocoder.json" "$DB"
+run_ep build
+check "second build skips" grep_log "Index already exists"
+new_data; old_format; run_ep update
+check "no-op update: exit 0" [ "$RC" = 0 ]
+check "no-op update: logs reason" grep_log "built by an older version"
+check "no-op update: new format in place" [ -f "$DATA/index/place_cells.bin" ]
+new_data; old_format; legacy_db; run_ep auto STUB_SERVER_DIE=1
+check "auto: rebuilt before the server starts" [ "$(head -1 "$STUB_LOG" | cut -d' ' -f1)" = build-index ]
+new_data; old_format; legacy_db; run_ep build STUB_BUILD_FAIL=1
+check "failed rebuild: exit 2" [ "$RC" = 2 ]
+check "failed rebuild: old index kept live" file_is "$DATA/index/geo_cells.bin" "old-index"
+check "failed rebuild: db migrated" file_is "$DATA/geocoder.json" "$DB"
+new_data; run_ep update STUB_OSMUPDATE_RC=0 STUB_BUILD_NO_PLACE=1
+check "incomplete build: exit 2" [ "$RC" = 2 ]
+check "incomplete build: not swapped" file_is "$DATA/index/geo_cells.bin" "old-index"
 
 echo
 echo "$CHECKS checks, $FAILS failed"
