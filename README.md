@@ -233,6 +233,7 @@ cargo build --release --manifest-path server/Cargo.toml
 | `UPDATE_MAX_DIFF_AGE` | Passed to `osmupdate --max-days`: widest range of daily diffs applied in one run. No automatic re-download; use `FORCE_REDOWNLOAD=1` for a PBF older than the replication server keeps diffs. | (unset = 250) |
 | `STAGING_DIR` | Where the new index is built before the atomic swap. | `$DATA_DIR/index.staging` |
 | `STATE_DIR` | Per-PBF replication state files. | `$DATA_DIR/state` |
+| `SKIP_DISK_CHECK` | Set to `1` to build even when less than twice the PBF data is free on the staging filesystem. | (unset) |
 | `FORCE_REDOWNLOAD` | Re-download every PBF on next launch (overrides the basename cache). | (unset) |
 | `CHECK_PBF_FRESHNESS` | Use `curl -z` to refresh only if the server's Last-Modified is newer. | (unset) |
 | `REPLICATION_BASE_URL_<basename>` | Replication URL for a PBF whose header lacks `osmosis_replication_base_url` and that has no state file yet (non-alphanumerics in the basename become underscores). Without a known URL the PBF is skipped rather than updated from planet. | (unset) |

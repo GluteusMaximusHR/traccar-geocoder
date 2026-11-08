@@ -37,6 +37,7 @@ aborted and the live index was left untouched, `143` interrupted by SIGTERM.
 | `UPDATE_MAX_DIFF_AGE`| (unset = osmupdate's 250) | Passed to `osmupdate --max-days`: the widest range of daily diffs it will assemble in one run. There is **no** automatic fall-back to a full download; a PBF older than the replication server keeps diffs for (Geofabrik: ~100 days) has to be re-fetched with `FORCE_REDOWNLOAD=1` |
 | `STAGING_DIR`        | `$DATA_DIR/index.staging` | Where the new index is built before the atomic swap. Keep it on the same filesystem as `$DATA_DIR/index` so the swap is a rename |
 | `STATE_DIR`          | `$DATA_DIR/state`    | Where per-PBF state files and the `rebuild-pending` marker are written |
+| `SKIP_DISK_CHECK`    | (unset)              | A rebuild refuses to start with less free space than twice the PBF data on the staging filesystem (the builder keeps a node cache of ~16 bytes per node next to the index and does not notice a full disk). `1` skips that check |
 | `FORCE_REDOWNLOAD`   | (unset)              | If set, re-download every PBF on the next `download_pbf` call           |
 | `CHECK_PBF_FRESHNESS`| (unset)              | If set, `curl -z` compares server Last-Modified against local mtime. Skipped for PBFs that osmupdate already maintains (they have a state file) |
 | `REPLICATION_BASE_URL_<basename>` | (unset) | Replication URL for a PBF whose header lacks `osmosis_replication_base_url` and that has no state file yet. Non-alphanumerics in the basename become underscores (e.g. `monaco-latest.osm.pbf` → `REPLICATION_BASE_URL_monaco_latest_osm_pbf`) |
@@ -178,30 +179,44 @@ so the restart step disappears. For now, restart-on-update is the contract.)
 The index format changed: `place_cells.bin` was added and node counts widened
 to 16 bits. The new server cannot load an index built by an older builder, so
 `build`, `auto` and `update` detect a missing `place_cells.bin` and rebuild
-once. `geocoder.json` moves from `index/` to `$DATA_DIR` at the same time.
+once. `geocoder.json` (users and API keys) used to live inside `index/` and
+now lives in `$DATA_DIR`; it is copied out at the moment of the swap and moved
+when this image's server starts, so until then the old server keeps finding
+it where it always was.
 
-**In `auto` mode the server is down during that first rebuild** (hours for
-Europe), because it cannot serve the old index in the meantime. To keep the
-outage to a restart, build first with a one-off container while the old one
-keeps serving, and switch immediately afterwards:
+**In `auto` mode the server is down during that first rebuild**, which takes
+hours for a country and days for Europe on a machine whose RAM does not hold
+the node cache (about 16 bytes per node; ~60 GB for Europe). The old index
+cannot be served by the new image in the meantime. To keep the outage to a
+restart, build first with a one-off container while the old one keeps
+serving, and switch immediately afterwards:
 
 ```sh
+# 1. stop the old container's own update timer, or it will collide with the
+#    pre-build (a second builder is refused by the build lock, but the old
+#    image has no lock): recreate it without UPDATE_INTERVAL for the duration
+# 2. pre-build with the new image; the old container keeps answering
 docker run --rm -v geocoder-data:/data -e PBF_URLS="$PBF_URLS" <new-image> build
+# 3. switch
 docker stop geocoder && docker rm geocoder   # then start the new image
 ```
 
-Until the switch, do not change users or API keys, and do not let the old
-container restart: it can no longer find its `geocoder.json` or read the new
-index.
+Between the pre-build's swap and the switch, do not change users or API keys
+in the old dashboard: the new server reads the copy in `$DATA_DIR`. Before the
+swap nothing has moved, so an old container that restarts during the build is
+unaffected.
 
-Rolling back to the old image needs both the old index and the database back
-in their old places. This only works until the next update swap, which
-replaces `index.old`:
+Rolling back to the old image means putting the old index back; its
+`geocoder.json` is still inside it. This only works until the next update
+swap, which replaces `index.old`:
 
 ```sh
 mv /data/index /data/index.new && mv /data/index.old /data/index
-mv /data/geocoder.json /data/index/geocoder.json
 ```
+
+Only one build runs at a time per staging directory (an `flock` on
+`$STAGING_DIR.lock`, released by the kernel if the builder dies). A second
+`build` or `update` started while one runs exits with status 2.
 
 Only a missing `place_cells.bin` is detected. An index built by an upstream
 image from between May and October 2026 has that file but the old node
