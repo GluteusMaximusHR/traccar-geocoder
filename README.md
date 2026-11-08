@@ -50,7 +50,7 @@ docker run -e PBF_URLS="https://download.geofabrik.de/europe-latest.osm.pbf" \
 # Serve only (from pre-built index)
 docker run -v geocoder-data:/data -p 3000:3000 traccar/traccar-geocoder serve
 
-# Apply OSM replication diffs and rebuild the index (in-place, one-shot)
+# Apply OSM replication diffs and rebuild the index (one-shot, against an existing volume)
 docker run -v geocoder-data:/data traccar/traccar-geocoder update
 
 # Auto mode with periodic incremental updates (refresh weekly)
@@ -224,13 +224,12 @@ cargo build --release --manifest-path server/Cargo.toml
 | `DATA_DIR` | Data directory for PBF files and index | `/data` |
 | `CACHE_DIR` | ACME certificate cache directory | `acme-cache` |
 | `UPDATE_INTERVAL` | When set in `auto` mode, schedules a recurring incremental update (`30d`, `7d`, `24h`, `60m`, `300s`). | (unset) |
-| `UPDATE_MAX_DIFF_AGE` | Passed to `osmupdate --max-merge` (days). PBFs older than this fall back to a fresh download. | `7` |
+| `UPDATE_MAX_DIFF_AGE` | Passed to `osmupdate --max-days`: widest range of daily diffs applied in one run. No automatic re-download; use `FORCE_REDOWNLOAD=1` for a PBF older than the replication server keeps diffs. | (unset = 250) |
 | `STAGING_DIR` | Where the new index is built before the atomic swap. | `$DATA_DIR/index.staging` |
 | `STATE_DIR` | Per-PBF replication state files. | `$DATA_DIR/state` |
 | `FORCE_REDOWNLOAD` | Re-download every PBF on next launch (overrides the basename cache). | (unset) |
 | `CHECK_PBF_FRESHNESS` | Use `curl -z` to refresh only if the server's Last-Modified is newer. | (unset) |
-| `REPLICATION_BASE_URL_<basename>` | Per-PBF replication URL override for PBFs lacking the `osmosis_replication_base_url` header (non-alphanumerics in the basename become underscores). | (unset) |
-| `ENABLE_SANITISE` | Run `osmconvert --drop-broken-refs` on the merged PBF before rebuild. Off by default. | (unset) |
+| `REPLICATION_BASE_URL_<basename>` | Replication URL for a PBF whose header lacks `osmosis_replication_base_url` and that has no state file yet (non-alphanumerics in the basename become underscores). Without a known URL the PBF is skipped rather than updated from planet. | (unset) |
 
 ## Incremental updates
 

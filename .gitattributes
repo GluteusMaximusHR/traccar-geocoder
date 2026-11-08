@@ -1,0 +1,6 @@
+# The entrypoint is copied into a Linux image verbatim; a CRLF checkout
+# (core.autocrlf=true on Windows) turns its shebang into "/bin/sh\r" and
+# the container fails with "exec entrypoint.sh: no such file or directory".
+* text=auto
+*.sh text eol=lf
+Dockerfile text eol=lf

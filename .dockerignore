@@ -4,3 +4,4 @@ server/target/
 test-output/
 *.osm.pbf
 .git/
+test-data/
