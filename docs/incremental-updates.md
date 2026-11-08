@@ -195,7 +195,8 @@ container restart: it can no longer find its `geocoder.json` or read the new
 index.
 
 Rolling back to the old image needs both the old index and the database back
-in their old places:
+in their old places. This only works until the next update swap, which
+replaces `index.old`:
 
 ```sh
 mv /data/index /data/index.new && mv /data/index.old /data/index
