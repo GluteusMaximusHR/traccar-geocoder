@@ -1,6 +1,7 @@
-use axum::extract::{Form, Path, State};
+use axum::extract::{Extension, Form, Path, State};
 use axum::http::header::SET_COOKIE;
 use axum::http::HeaderMap;
+use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
@@ -11,6 +12,9 @@ use std::fs;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::branding::Pages;
+use crate::status::Status;
 
 // --- Data model ---
 
@@ -113,10 +117,15 @@ pub fn check_rate(limiter: &RateLimiter, login: &str, rate_per_second: u32, rate
         state.day_count.store(0, Relaxed);
     }
 
-    if rate_per_second > 0 && state.second_count.fetch_add(1, Relaxed) >= rate_per_second {
+    // Count every request, even for users without limits, so the dashboard
+    // can show today's usage. A request rejected by the per-second limit is
+    // not counted against the day, as before.
+    let second_count = state.second_count.fetch_add(1, Relaxed);
+    if rate_per_second > 0 && second_count >= rate_per_second {
         return Err("Rate limit exceeded (per second)");
     }
-    if rate_per_day > 0 && state.day_count.fetch_add(1, Relaxed) >= rate_per_day {
+    let day_count = state.day_count.fetch_add(1, Relaxed);
+    if rate_per_day > 0 && day_count >= rate_per_day {
         return Err("Rate limit exceeded (per day)");
     }
 
@@ -158,6 +167,7 @@ pub fn router() -> Router<Arc<RwLock<Db>>> {
         .route("/", get(dashboard))
         .route("/login", get(login_page).post(login_submit))
         .route("/logout", get(logout))
+        .route("/password", post(change_password))
         .route("/tokens", post(create_token))
         .route("/tokens/{token}/delete", get(delete_token))
         .route("/users", post(create_user_handler))
@@ -172,17 +182,17 @@ struct LoginForm {
     password: String,
 }
 
-async fn login_page(headers: HeaderMap, state: State<Arc<RwLock<Db>>>) -> Response {
+async fn login_page(headers: HeaderMap, state: State<Arc<RwLock<Db>>>, pages: Extension<Arc<Pages>>) -> Response {
     if let Some(session_id) = get_session_cookie(&headers) {
         let db = state.read().unwrap();
         if db.sessions.contains_key(&session_id) {
             return Redirect::to("/").into_response();
         }
     }
-    Html(LOGIN_HTML).into_response()
+    Html(pages.login.replace("{error}", "")).into_response()
 }
 
-async fn login_submit(state: State<Arc<RwLock<Db>>>, Form(form): Form<LoginForm>) -> Response {
+async fn login_submit(state: State<Arc<RwLock<Db>>>, pages: Extension<Arc<Pages>>, Form(form): Form<LoginForm>) -> Response {
     let mut db = state.write().unwrap();
 
     // First login ever — create admin account
@@ -198,8 +208,7 @@ async fn login_submit(state: State<Arc<RwLock<Db>>>, Form(form): Form<LoginForm>
             return (cookie, Redirect::to("/")).into_response();
         }
     }
-    Html(LOGIN_HTML.replace("</form>", "<small><ins>Invalid credentials</ins></small></form>"))
-        .into_response()
+    Html(pages.login.replace("{error}", "<div class=\"error\">Invalid credentials</div>")).into_response()
 }
 
 async fn logout(headers: HeaderMap, state: State<Arc<RwLock<Db>>>) -> Response {
@@ -211,10 +220,44 @@ async fn logout(headers: HeaderMap, state: State<Arc<RwLock<Db>>>) -> Response {
     (cookie, Redirect::to("/login")).into_response()
 }
 
+#[derive(Deserialize)]
+struct PasswordForm {
+    current_password: String,
+    new_password: String,
+}
+
+async fn change_password(headers: HeaderMap, state: State<Arc<RwLock<Db>>>, Form(form): Form<PasswordForm>) -> Response {
+    let mut db = state.write().unwrap();
+    let login = get_session_cookie(&headers).and_then(|id| db.sessions.get(&id).cloned());
+    if let Some(user) = login.and_then(|login| db.users.get_mut(&login)) {
+        if !form.new_password.is_empty() && bcrypt::verify(&form.current_password, &user.password_hash).unwrap_or(false) {
+            user.password_hash = bcrypt::hash(&form.new_password, bcrypt::DEFAULT_COST).expect("bcrypt hash failed");
+            db.save();
+            return Redirect::to("/").into_response();
+        }
+    }
+    StatusCode::BAD_REQUEST.into_response()
+}
+
+/// Requests today for a login: its own counter plus, for "by IP" users, one
+/// counter per client address (rate keys look like `login:ip`).
+fn requests_today(limiter: &RateLimiter, login: &str) -> u64 {
+    let now_day = (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() / 86400) as u32;
+    let prefix = format!("{}:", login);
+    let map = limiter.read().unwrap();
+    map.iter()
+        .filter(|(key, _)| key.as_str() == login || key.starts_with(&prefix))
+        .filter(|(_, s)| s.day_ts.load(Relaxed) == now_day)
+        .map(|(_, s)| s.day_count.load(Relaxed) as u64)
+        .sum()
+}
+
 async fn dashboard(
     headers: HeaderMap,
     state: State<Arc<RwLock<Db>>>,
-    limiter: axum::extract::Extension<Arc<RateLimiter>>,
+    limiter: Extension<Arc<RateLimiter>>,
+    pages: Extension<Arc<Pages>>,
+    status: Extension<Arc<Status>>,
 ) -> Response {
     let session_id = match get_session_cookie(&headers) {
         Some(s) => s,
@@ -229,47 +272,66 @@ async fn dashboard(
 
     let is_admin = db.users.get(&login).map(|u| u.admin).unwrap_or(false);
 
+    let mut tokens: Vec<&String> = db.tokens.iter().filter(|(_, owner)| *owner == &login).map(|(t, _)| t).collect();
+    tokens.sort();
     let mut rows = String::new();
-    for (token, owner) in &db.tokens {
-        if owner == &login {
-            rows.push_str(&format!(
-                "<tr><td><code>{}</code></td><td><a href=\"/tokens/{}/delete\">Delete</a></td></tr>",
-                html_escape(token),
-                html_escape(token),
-            ));
-        }
+    for token in &tokens {
+        let t = html_escape(token);
+        rows.push_str(&format!(
+            "<tr><td><code data-key=\"{t}\">{t}</code></td>\
+             <td class=\"actions\">\
+             <button type=\"button\" class=\"btn ghost sm\" data-copy=\"{t}\" onclick=\"copyText(this)\">Copy</button> \
+             <a class=\"btn danger sm\" href=\"/tokens/{t}/delete\" onclick=\"return confirm('Delete this API key? Clients using it will get 401.')\">Delete</a>\
+             </td></tr>",
+        ));
+    }
+    if tokens.is_empty() {
+        rows.push_str("<tr><td class=\"empty\" colspan=\"2\">No API keys yet.</td></tr>");
     }
 
     let mut user_rows = String::new();
     if is_admin {
-        for (ulogin, user) in &db.users {
+        let mut users: Vec<(&String, &User)> = db.users.iter().collect();
+        users.sort_by(|a, b| a.0.cmp(b.0));
+        for (ulogin, user) in users {
             let role = if user.admin { "Admin" } else { "User" };
             let delete = if ulogin != &login {
-                format!("<a href=\"/users/{}/delete\">Delete</a>", html_escape(ulogin))
+                format!(
+                    "<a class=\"btn danger sm\" href=\"/users/{}/delete\" onclick=\"return confirm('Delete user {} and all of their API keys?')\">Delete</a>",
+                    html_escape(ulogin),
+                    html_escape(&ulogin.replace('\'', "\\'")),
+                )
             } else {
                 String::new()
             };
             let by_ip = if user.rate_by_ip { "Yes" } else { "" };
+            let today = requests_today(&limiter, ulogin);
+            let meter = if user.rate_per_day > 0 && !user.rate_by_ip {
+                let pct = (today * 100 / user.rate_per_day as u64).min(100);
+                format!(" <span class=\"meter\" title=\"{}% of the daily limit\"><i style=\"width:{}%\"></i></span>", pct, pct)
+            } else {
+                String::new()
+            };
             user_rows.push_str(&format!(
-                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-                html_escape(ulogin), role, user.rate_per_second, user.rate_per_day, by_ip, delete
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}{}</td><td class=\"actions\">{}</td></tr>",
+                html_escape(ulogin), role, user.rate_per_second, user.rate_per_day, by_ip, today, meter, delete
             ));
         }
     }
 
-    let now_day = (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() / 86400) as u32;
-    let daily_usage = {
-        let map = limiter.read().unwrap();
-        map.get(&login).map(|s| {
-            if s.day_ts.load(Relaxed) == now_day { s.day_count.load(Relaxed) } else { 0 }
-        }).unwrap_or(0)
-    };
+    let daily_usage = requests_today(&limiter, &login);
 
-    let html = DASHBOARD_HTML
+    let html = pages
+        .dashboard
         .replace("{user}", &html_escape(&login))
         .replace("{rows}", &rows)
         .replace("{user_rows}", &user_rows)
         .replace("{daily_usage}", &daily_usage.to_string())
+        .replace("{key_count}", &tokens.len().to_string())
+        .replace("{osm_date}", &status.osm_date_html())
+        .replace("{uptime}", &status.uptime_html())
+        .replace("{hour_bars}", &status.hour_bars_html())
+        .replace("{info_rows}", &status.info_rows_html())
         .replace("{users_display}", if is_admin { "" } else { "display:none" });
     Html(html).into_response()
 }
@@ -357,12 +419,13 @@ async fn delete_user(
     Redirect::to("/").into_response()
 }
 
-fn html_escape(s: &str) -> String {
+pub(crate) fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
 }
 
-const LOGIN_HTML: &str = include_str!("web/login.html");
-const DASHBOARD_HTML: &str = include_str!("web/dashboard.html");
+/// Page templates; `Branding::render_pages` fills the `{brand_*}` placeholders at startup.
+pub const LOGIN_HTML: &str = include_str!("web/login.html");
+pub const DASHBOARD_HTML: &str = include_str!("web/dashboard.html");

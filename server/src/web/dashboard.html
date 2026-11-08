@@ -1,48 +1,143 @@
 <!DOCTYPE html>
-<html data-theme="light">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Geocoder</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
-  <style>td { word-break: break-all; } td:last-child { width: 1%; white-space: nowrap; }</style>
+  <title>{brand_name}</title>
+  {brand_favicon}
+  <style>:root { --brand: {brand_color}; }</style>
+  <style>{style}</style>
 </head>
 <body>
-  <main class="container">
-    <nav>
-      <ul><li>Today: {daily_usage}</li></ul>
-      <ul><li><a href="/logout">Sign out</a></li></ul>
-    </nav>
-    <article>
-      <h4>API Tokens</h4>
-      <form method="post" action="/tokens">
-        <button type="submit" class="outline">Create Token</button>
-      </form>
-      <table>
-        <thead><tr><th>Token</th><th></th></tr></thead>
+  <header class="top"><div class="in">
+    <a class="logo" href="{brand_url}">{brand_logo}</a>
+    <div class="right"><span class="who">Signed in as <b>{user}</b></span><a href="/logout">Sign out</a></div>
+  </div></header>
+  <main>
+    <div class="stats">
+      <div class="stat"><div class="k">Requests today</div><div class="v">{daily_usage}</div></div>
+      <div class="stat"><div class="k">API keys</div><div class="v">{key_count}</div></div>
+      <div class="stat"><div class="k">OSM data as of</div><div class="v sm">{osm_date}</div></div>
+      <div class="stat"><div class="k">Uptime</div><div class="v sm">{uptime}</div></div>
+    </div>
+
+    <section class="card">
+      <div class="head">
+        <div><h2>API keys</h2><p class="sub">Pass a key as <code>?key=</code> on <code>/reverse</code> and <code>/snap</code>.</p></div>
+        <form method="post" action="/tokens"><button type="submit" class="btn">+ Create key</button></form>
+      </div>
+      <table id="keys">
+        <thead><tr><th>Key</th><th></th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
-    </article>
-    <article style="{users_display}">
-      <h4>Users</h4>
-      <form method="post" action="/users">
-        <fieldset role="group">
-          <input type="text" name="login" placeholder="Login" required>
-          <input type="password" name="password" placeholder="Password" required>
-          <input type="number" name="rate_per_second" placeholder="Rate/sec" value="0" min="0" required>
-          <input type="number" name="rate_per_day" placeholder="Rate/day" value="0" min="0" required>
-          <select name="rate_by_ip">
-            <option value="">By user</option>
-            <option value="on">By IP</option>
-          </select>
-          <button type="submit">Create</button>
-        </fieldset>
+    </section>
+
+    <section class="card">
+      <div class="head"><div><h2>Try it</h2><p class="sub">Sends a real request to this server with one of your keys. Nothing is stored.</p></div></div>
+      <form id="try" class="grid" onsubmit="return tryIt(event)">
+        <div><label for="try-ep">Endpoint</label><select id="try-ep"><option value="/reverse">/reverse</option><option value="/snap">/snap</option></select></div>
+        <div><label for="try-lat">Latitude</label><input id="try-lat" type="text" inputmode="decimal" placeholder="45.8150" required></div>
+        <div><label for="try-lon">Longitude</label><input id="try-lon" type="text" inputmode="decimal" placeholder="15.9819" required></div>
+        <div><label for="try-key">Key</label><select id="try-key"></select></div>
+        <div><button type="submit" class="btn wide" id="try-btn">Send</button></div>
+      </form>
+      <div id="try-meta" class="muted small" style="margin-top:10px;display:none"></div>
+      <pre id="try-out" style="display:none"></pre>
+    </section>
+
+    <section class="card" id="snippets" style="display:none">
+      <div class="head"><div><h2>Use it from Traccar</h2><p class="sub">Ready-made configuration with this server's address and your first key.</p></div></div>
+      <div class="muted small" style="margin-top:4px">Traccar <code>traccar.xml</code> <button type="button" class="btn ghost sm" onclick="copyText(this, 'snip-traccar')">Copy</button></div>
+      <pre id="snip-traccar"></pre>
+      <div class="muted small" style="margin-top:12px">curl <button type="button" class="btn ghost sm" onclick="copyText(this, 'snip-curl')">Copy</button></div>
+      <pre id="snip-curl"></pre>
+    </section>
+
+    <section class="card">
+      <div class="head"><div><h2>Usage</h2><p class="sub">Requests per hour over the last 24 hours, all users. Counted in memory since the server started.</p></div></div>
+      <div class="bars">{hour_bars}</div>
+      <div class="axis"><span>24 h ago</span><span>12 h ago</span><span>now</span></div>
+    </section>
+
+    <section class="card">
+      <div class="head"><div><h2>Server &amp; data</h2><p class="sub">Also available as JSON at <a href="/health"><code>/health</code></a> for monitoring.</p></div></div>
+      <div class="kv">{info_rows}</div>
+    </section>
+
+    <section class="card" style="{users_display}">
+      <div class="head"><div><h2>Users</h2><p class="sub">A rate of 0 means unlimited. "By IP" applies the limits to each client address separately.</p></div></div>
+      <form method="post" action="/users" class="grid" style="margin-bottom:16px">
+        <div><label for="u-login">Login</label><input id="u-login" type="text" name="login" autocomplete="off" required></div>
+        <div><label for="u-pass">Password</label><input id="u-pass" type="password" name="password" autocomplete="new-password" required></div>
+        <div><label for="u-rps">Rate / second</label><input id="u-rps" type="number" name="rate_per_second" value="0" min="0" required></div>
+        <div><label for="u-rpd">Rate / day</label><input id="u-rpd" type="number" name="rate_per_day" value="0" min="0" required></div>
+        <div><label for="u-ip">Limit</label><select id="u-ip" name="rate_by_ip"><option value="">By user</option><option value="on">By IP</option></select></div>
+        <div><button type="submit" class="btn wide">Create user</button></div>
       </form>
       <table>
-        <thead><tr><th>Login</th><th>Role</th><th>Rate/sec</th><th>Rate/day</th><th>By IP</th><th></th></tr></thead>
+        <thead><tr><th>Login</th><th>Role</th><th>Rate/sec</th><th>Rate/day</th><th>By IP</th><th>Today</th><th></th></tr></thead>
         <tbody>{user_rows}</tbody>
       </table>
-    </article>
+    </section>
+
+    <section class="card">
+      <details>
+        <summary>Change password</summary>
+        <form method="post" action="/password" class="grid">
+          <div><label for="p-cur">Current password</label><input id="p-cur" type="password" name="current_password" autocomplete="current-password" required></div>
+          <div><label for="p-new">New password</label><input id="p-new" type="password" name="new_password" autocomplete="new-password" required></div>
+          <div><button type="submit" class="btn ghost wide">Change password</button></div>
+        </form>
+      </details>
+    </section>
   </main>
+  {brand_footer}
+  <script>
+    function copyText(btn, id) {
+      var el = document.getElementById(id);
+      var text = el ? el.textContent : btn.getAttribute('data-copy');
+      var done = function () { var old = btn.textContent; btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = old; }, 1500); };
+      if (navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(text).then(done); return; }
+      var ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); done(); } catch (e) {} document.body.removeChild(ta);
+    }
+    var keys = Array.prototype.map.call(document.querySelectorAll('#keys code[data-key]'), function (c) { return c.getAttribute('data-key'); });
+    var keySel = document.getElementById('try-key');
+    keys.forEach(function (k) { var o = document.createElement('option'); o.value = k; o.textContent = k.slice(0, 8) + '…' + k.slice(-4); keySel.appendChild(o); });
+    if (!keys.length) { var o = document.createElement('option'); o.value = ''; o.textContent = 'create a key first'; keySel.appendChild(o); document.getElementById('try-btn').disabled = true; }
+    if (keys.length) {
+      var base = location.origin;
+      document.getElementById('snip-traccar').textContent =
+        "<entry key='geocoder.enable'>true</entry>\n<entry key='geocoder.type'>nominatim</entry>\n" +
+        "<entry key='geocoder.url'>" + base + "/reverse</entry>\n<entry key='geocoder.key'>" + keys[0] + "</entry>";
+      document.getElementById('snip-curl').textContent = "curl '" + base + "/reverse?lat=45.8150&lon=15.9819&key=" + keys[0] + "'";
+      document.getElementById('snippets').style.display = '';
+    }
+    try { var last = JSON.parse(localStorage.getItem('tryit') || 'null'); if (last) { document.getElementById('try-lat').value = last.lat; document.getElementById('try-lon').value = last.lon; } } catch (e) {}
+    function tryIt(ev) {
+      ev.preventDefault();
+      var ep = document.getElementById('try-ep').value, lat = document.getElementById('try-lat').value.trim().replace(',', '.'),
+          lon = document.getElementById('try-lon').value.trim().replace(',', '.'), key = keySel.value;
+      var meta = document.getElementById('try-meta'), out = document.getElementById('try-out'), btn = document.getElementById('try-btn');
+      try { localStorage.setItem('tryit', JSON.stringify({ lat: lat, lon: lon })); } catch (e) {}
+      btn.disabled = true; meta.style.display = ''; meta.textContent = 'Sending…'; out.style.display = 'none';
+      var t0 = performance.now();
+      fetch(ep + '?lat=' + encodeURIComponent(lat) + '&lon=' + encodeURIComponent(lon) + '&key=' + encodeURIComponent(key))
+        .then(function (r) { return r.text().then(function (body) { return { status: r.status, body: body }; }); })
+        .then(function (r) {
+          var ms = (performance.now() - t0).toFixed(1);
+          var pretty = r.body; try { pretty = JSON.stringify(JSON.parse(r.body), null, 2); } catch (e) {}
+          meta.innerHTML = '';
+          meta.appendChild(document.createTextNode('HTTP ' + r.status + ' · ' + ms + ' ms · '));
+          var a = document.createElement('a'); a.target = '_blank'; a.rel = 'noopener';
+          a.href = 'https://www.openstreetmap.org/?mlat=' + encodeURIComponent(lat) + '&mlon=' + encodeURIComponent(lon) + '#map=17/' + encodeURIComponent(lat) + '/' + encodeURIComponent(lon);
+          a.textContent = 'open in OpenStreetMap'; meta.appendChild(a);
+          out.textContent = pretty; out.style.display = '';
+        })
+        .catch(function (e) { meta.textContent = 'Request failed: ' + e; })
+        .then(function () { btn.disabled = false; });
+      return false;
+    }
+  </script>
 </body>
 </html>

@@ -1,4 +1,6 @@
 mod auth;
+mod branding;
+mod status;
 
 use axum::extract::Query;
 use axum::http::StatusCode;
@@ -804,9 +806,11 @@ async fn reverse_geocode(
     state: axum::extract::State<Arc<RwLock<auth::Db>>>,
     index: axum::extract::Extension<Arc<Index>>,
     limiter: axum::extract::Extension<Arc<auth::RateLimiter>>,
+    status: axum::extract::Extension<Arc<status::Status>>,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> Response {
     if let Err(r) = authorize(&params.key, &state, &limiter, connect_info.0) { return r; }
+    status.stats.record();
 
     let search_distance = params.distance.unwrap_or(DEFAULT_SEARCH_DISTANCE);
     json_response(&index.query(params.lat, params.lon, search_distance))
@@ -817,9 +821,11 @@ async fn snap_to_road(
     state: axum::extract::State<Arc<RwLock<auth::Db>>>,
     index: axum::extract::Extension<Arc<Index>>,
     limiter: axum::extract::Extension<Arc<auth::RateLimiter>>,
+    status: axum::extract::Extension<Arc<status::Status>>,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> Response {
     if let Err(r) = authorize(&params.key, &state, &limiter, connect_info.0) { return r; }
+    status.stats.record();
 
     let search_distance = params.distance.unwrap_or(DEFAULT_SEARCH_DISTANCE);
     match index.snap(params.lat, params.lon, search_distance) {
@@ -854,12 +860,23 @@ async fn main() {
     let db = Arc::new(RwLock::new(db));
     let limiter = Arc::new(auth::RateLimiter::default()); // RwLock<HashMap> with atomic counters
 
+    // Web UI: branding from BRAND_* env vars, templates rendered once.
+    let branding = Arc::new(branding::Branding::from_env());
+    eprintln!("Branding: {}", branding.describe());
+    let pages = Arc::new(branding.render_pages(auth::LOGIN_HTML, auth::DASHBOARD_HTML));
+    let status = Arc::new(status::Status::new(data_dir));
+
     let app = Router::new()
         .route("/reverse", get(reverse_geocode))
         .route("/snap", get(snap_to_road))
+        .route("/health", get(status::health))
         .merge(auth::router())
+        .merge(branding::router())
         .layer(axum::Extension(index))
         .layer(axum::Extension(limiter))
+        .layer(axum::Extension(branding))
+        .layer(axum::Extension(pages))
+        .layer(axum::Extension(status))
         .with_state(db);
 
     // ACME mode: --domain <domain> [--cache <dir>]
