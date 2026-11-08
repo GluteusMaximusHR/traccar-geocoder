@@ -70,7 +70,9 @@ docker run -e PBF_URLS="https://planet.openstreetmap.org/pbf/planet-latest.osm.p
 
 PBF files can be downloaded from [Geofabrik](https://download.geofabrik.de/).
 
-The full earth index will take up around 18gb of disk space, so for high performance you want a machine with at least 16gb ram, or fast NVME storage.
+We also provide a [ready-to-use index](https://traccar.nyc3.digitaloceanspaces.com/download/index.tar.gz) so you can skip building the index yourself.
+
+The full earth index will take up around 21 GB of disk space, so for high performance you want a machine with at least 16gb ram, or fast NVME storage.
 
 ## API
 
@@ -149,7 +151,7 @@ Status codes:
 
 ### Authentication
 
-The server includes a web dashboard for managing API keys. On first launch, navigate to the server URL in a browser to create an admin account. Once logged in, you can generate API keys and create additional users with configurable rate limits.
+The server includes a web dashboard for managing API keys. On first launch, navigate to the server URL in a browser to create an admin account. Once logged in, you can generate API keys, create additional users with configurable rate limits, send test requests, and see usage and index status. The dashboard works offline and can carry your own name, colour and logo via the `BRAND_*` variables below; see [docs/branding.md](docs/branding.md). `GET /health` returns the same server status as JSON for monitoring.
 
 ## Architecture
 
@@ -184,9 +186,9 @@ The builder produces 14 binary files:
 ### Prerequisites
 
 **Builder (C++):**
-- CMake 3.16+
+- CMake 3.22+
 - C++17 compiler
-- libosmium, protozero, s2geometry, zlib, bzip2, expat
+- libosmium, protozero, zlib, bzip2, expat
 
 **Server (Rust):**
 - Rust toolchain
@@ -205,13 +207,16 @@ cargo build --release --manifest-path server/Cargo.toml
 
 ```bash
 # Create index from PBF file
-./build/build-index output-dir input.osm.pbf [input2.osm.pbf ...]
+./build/build-index data-dir/index input.osm.pbf [input2.osm.pbf ...]
+
+# Optionally, also index unnamed roads for road snapping
+./build/build-index data-dir/index input.osm.pbf --all-roads
 
 # Start the server
-./server/target/release/query-server output-dir [bind-address]
+./server/target/release/query-server data-dir [bind-address]
 
 # Start with automatic HTTPS
-./server/target/release/query-server output-dir --domain geocoder.example.com
+./server/target/release/query-server data-dir --domain geocoder.example.com
 ```
 
 ## Environment Variables (Docker)
@@ -223,13 +228,23 @@ cargo build --release --manifest-path server/Cargo.toml
 | `BIND_ADDR` | HTTP bind address | `0.0.0.0:3000` |
 | `DATA_DIR` | Data directory for PBF files and index | `/data` |
 | `CACHE_DIR` | ACME certificate cache directory | `acme-cache` |
+| `INDEX_ALL_ROADS` | Set to `true` to also index unnamed roads for road snapping | `false` |
 | `UPDATE_INTERVAL` | When set in `auto` mode, schedules a recurring incremental update (`30d`, `7d`, `24h`, `60m`, `300s`). | (unset) |
 | `UPDATE_MAX_DIFF_AGE` | Passed to `osmupdate --max-days`: widest range of daily diffs applied in one run. No automatic re-download; use `FORCE_REDOWNLOAD=1` for a PBF older than the replication server keeps diffs. | (unset = 250) |
 | `STAGING_DIR` | Where the new index is built before the atomic swap. | `$DATA_DIR/index.staging` |
 | `STATE_DIR` | Per-PBF replication state files. | `$DATA_DIR/state` |
+| `SKIP_DISK_CHECK` | Set to `1` to build even when less than twice the PBF data is free on the staging filesystem. | (unset) |
 | `FORCE_REDOWNLOAD` | Re-download every PBF on next launch (overrides the basename cache). | (unset) |
 | `CHECK_PBF_FRESHNESS` | Use `curl -z` to refresh only if the server's Last-Modified is newer. | (unset) |
 | `REPLICATION_BASE_URL_<basename>` | Replication URL for a PBF whose header lacks `osmosis_replication_base_url` and that has no state file yet (non-alphanumerics in the basename become underscores). Without a known URL the PBF is skipped rather than updated from planet. | (unset) |
+| `BRAND_NAME` | Product name shown in the web UI. | `Geocoder` |
+| `BRAND_COLOR` | Accent colour of the web UI (any plain CSS colour). | `#4f6ee0` |
+| `BRAND_LOGO` | Path to a logo image for the web UI header (served at `/brand/logo`). | (none) |
+| `BRAND_LOGO_DARK` | Logo variant for dark colour schemes. | (none) |
+| `BRAND_FAVICON` | Path to the favicon. | logo, else a generic pin |
+| `BRAND_URL` | Link target of the header logo. | `/` |
+| `BRAND_FOOTER` | Footer text, e.g. your company name. | (none) |
+| `HEALTH_DETAILS` | `1` serves the full `/health` body (request counts, OSM data dates, next update) without a login; otherwise it needs a dashboard session. | (unset) |
 
 ## Incremental updates
 

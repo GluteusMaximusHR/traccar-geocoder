@@ -1,0 +1,27 @@
+# Inteling deployment of traccar-geocoder with the Inteling look.
+# Branding is plain configuration: copy this directory to the server as
+# /root/geocoder/branding and point the BRAND_* variables at the files.
+# Everything else (PBF_URLS, UPDATE_INTERVAL, DOMAIN, ...) is the normal
+# configuration documented in the project README.
+services:
+  geocoder:
+    image: tg-local
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - geocoder-data:/data
+      - ./branding:/data/branding:ro
+    environment:
+      PBF_URLS: https://download.geofabrik.de/europe-latest.osm.pbf
+      UPDATE_INTERVAL: 30d
+      BRAND_NAME: Inteling Geocoder
+      BRAND_COLOR: "#1a56db"
+      BRAND_URL: https://www.inteling.eu
+      BRAND_FOOTER: Inteling d.o.o.
+      BRAND_LOGO: /data/branding/logo.svg
+      BRAND_LOGO_DARK: /data/branding/logo-dark.svg
+      BRAND_FAVICON: /data/branding/favicon.svg
+
+volumes:
+  geocoder-data:

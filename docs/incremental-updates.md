@@ -25,6 +25,14 @@ against the same volume as your serve container; the swap is safe with a
 running server (see below). For a single-container, no-external-scheduler
 setup, use `auto` + `UPDATE_INTERVAL`.
 
+`auto` never blocks on a rebuild it can avoid. If the container starts (or
+restarts) while a loadable index exists but a rebuild is pending, because a
+PBF was replaced or a previous cycle's build failed, the server comes up on
+the existing index right away; with `UPDATE_INTERVAL` the first cycle runs
+immediately and rebuilds in staging while serving, without it a warning asks
+you to run `update`. Only a missing index, or one in a format this image
+cannot load, is built before the server starts.
+
 Exit codes of `update`: `0` success or nothing to do, `2` the cycle was
 aborted and the live index was left untouched, `143` interrupted by SIGTERM.
 
@@ -37,6 +45,7 @@ aborted and the live index was left untouched, `143` interrupted by SIGTERM.
 | `UPDATE_MAX_DIFF_AGE`| (unset = osmupdate's 250) | Passed to `osmupdate --max-days`: the widest range of daily diffs it will assemble in one run. There is **no** automatic fall-back to a full download; a PBF older than the replication server keeps diffs for (Geofabrik: ~100 days) has to be re-fetched with `FORCE_REDOWNLOAD=1` |
 | `STAGING_DIR`        | `$DATA_DIR/index.staging` | Where the new index is built before the atomic swap. Keep it on the same filesystem as `$DATA_DIR/index` so the swap is a rename |
 | `STATE_DIR`          | `$DATA_DIR/state`    | Where per-PBF state files and the `rebuild-pending` marker are written |
+| `SKIP_DISK_CHECK`    | (unset)              | A rebuild refuses to start with less free space than twice the PBF data on the staging filesystem (the builder keeps a node cache of ~16 bytes per node next to the index and does not notice a full disk). `1` skips that check |
 | `FORCE_REDOWNLOAD`   | (unset)              | If set, re-download every PBF on the next `download_pbf` call           |
 | `CHECK_PBF_FRESHNESS`| (unset)              | If set, `curl -z` compares server Last-Modified against local mtime. Skipped for PBFs that osmupdate already maintains (they have a state file) |
 | `REPLICATION_BASE_URL_<basename>` | (unset) | Replication URL for a PBF whose header lacks `osmosis_replication_base_url` and that has no state file yet. Non-alphanumerics in the basename become underscores (e.g. `monaco-latest.osm.pbf` → `REPLICATION_BASE_URL_monaco_latest_osm_pbf`) |
@@ -64,8 +73,8 @@ the real name.
      if a file that had ways now has none.
    - Replace the PBF, set the `rebuild-pending` marker, write the state file.
 2. If any PBF changed, or the marker is set from an earlier failed rebuild,
-   or there is no index yet: build into `$STAGING_DIR`, copy
-   `index/geocoder.json` (users and API keys) into it, then
+   or there is no index yet, or the index is in an older format: build into
+   `$STAGING_DIR`, then
    `mv index index.old && mv index.staging index`. If the second rename
    fails, the first is rolled back. The marker is cleared only after a
    successful swap, so a build that dies (OOM, `docker stop`, disk full)
@@ -167,10 +176,59 @@ docker compose run --rm geocoder-updater && docker compose restart geocoder
 ```
 
 Restarting is safe at any time: the server is stateless apart from
-`geocoder.json`, which the swap carries over.
+`$DATA_DIR/geocoder.json` (users and API keys), which lives outside the index
+directory and is not touched by the swap.
 
 (A future revision may add SIGHUP-driven graceful reload in the server itself
 so the restart step disappears. For now, restart-on-update is the contract.)
+
+## Upgrading from an older image
+
+The index format changed: `place_cells.bin` was added and node counts widened
+to 16 bits. The new server cannot load an index built by an older builder, so
+`build`, `auto` and `update` detect a missing `place_cells.bin` and rebuild
+once. `geocoder.json` (users and API keys) used to live inside `index/` and
+now lives in `$DATA_DIR`; it is copied out at the moment of the swap and moved
+when this image's server starts, so until then the old server keeps finding
+it where it always was.
+
+**In `auto` mode the server is down during that first rebuild**, which takes
+hours for a country and days for Europe on a machine whose RAM does not hold
+the node cache (about 16 bytes per node; ~60 GB for Europe). The old index
+cannot be served by the new image in the meantime. To keep the outage to a
+restart, build first with a one-off container while the old one keeps
+serving, and switch immediately afterwards:
+
+```sh
+# 1. stop the old container's own update timer, or it will collide with the
+#    pre-build (a second builder is refused by the build lock, but the old
+#    image has no lock): recreate it without UPDATE_INTERVAL for the duration
+# 2. pre-build with the new image; the old container keeps answering
+docker run --rm -v geocoder-data:/data -e PBF_URLS="$PBF_URLS" <new-image> build
+# 3. switch
+docker stop geocoder && docker rm geocoder   # then start the new image
+```
+
+Between the pre-build's swap and the switch, do not change users or API keys
+in the old dashboard: the new server reads the copy in `$DATA_DIR`. Before the
+swap nothing has moved, so an old container that restarts during the build is
+unaffected.
+
+Rolling back to the old image means putting the old index back; its
+`geocoder.json` is still inside it. This only works until the next update
+swap, which replaces `index.old`:
+
+```sh
+mv /data/index /data/index.new && mv /data/index.old /data/index
+```
+
+Only one build runs at a time per staging directory (an `flock` on
+`$STAGING_DIR.lock`, released by the kernel if the builder dies). A second
+`build` or `update` started while one runs exits with status 2.
+
+Only a missing `place_cells.bin` is detected. An index built by an upstream
+image from between May and October 2026 has that file but the old node
+counts; force its rebuild with `touch /data/state/rebuild-pending`.
 
 ## Caveats
 

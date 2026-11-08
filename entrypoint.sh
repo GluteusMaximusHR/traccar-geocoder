@@ -76,6 +76,58 @@ list_pbfs() {
     done
 }
 
+# place_cells.bin is absent from indexes built before the server started
+# requiring it; those fail to load and must be rebuilt.
+index_is_current() {
+    [ -f "$1/geo_cells.bin" ] && [ -f "$1/place_cells.bin" ]
+}
+
+# Older versions kept users/API keys inside the index directory, where the
+# next swap would move them away and a later one delete them.
+#
+# `migrate_geocoder_db copy` runs right before a swap: a server from an
+# older image may still be serving (or restart) while an upgrade build
+# runs, and it looks for the file inside index/, so the original stays
+# put and follows the old index into index.old, where a rollback finds
+# it. `migrate_geocoder_db move` runs when this image's server starts and
+# nothing else reads the old location any more.
+migrate_geocoder_db() {
+    old="$DATA_DIR/index/geocoder.json"
+    new="$DATA_DIR/geocoder.json"
+    [ -f "$old" ] || return 0
+    if [ ! -f "$new" ]; then
+        echo "Migrating geocoder.json out of index folder..."
+        if [ "$1" = "copy" ]; then
+            cp -p "$old" "$new" || return 2
+        else
+            mv "$old" "$new" || return 2
+        fi
+    elif ! cmp -s "$old" "$new"; then
+        echo "Warning: $old and $new differ; the server uses $new. Users or keys changed in the other copy are not carried over." >&2
+    fi
+}
+
+# A Europe build keeps a ~60 GB node-location cache next to the index it
+# writes, and build-index does not notice a full disk (it exits 0 with
+# truncated files). Refuse to start a build with less free space than
+# twice the PBF data unless the operator says otherwise.
+check_disk_space() {
+    [ "${SKIP_DISK_CHECK:-0}" = "1" ] && return 0
+    need=0
+    for f in $(list_pbfs); do
+        size=$(stat -c %s "$f" 2>/dev/null) || return 0
+        need=$(( need + size ))
+    done
+    need=$(( need * 2 ))
+    mkdir -p "$(dirname "$1")"
+    free=$(df -B1 --output=avail "$(dirname "$1")" 2>/dev/null | tail -1 | tr -d ' ')
+    case "$free" in ""|*[!0-9]*) return 0 ;; esac
+    if [ "$free" -lt "$need" ]; then
+        echo "Error: $(( free / 1048576 )) MB free under $(dirname "$1"), but a rebuild needs about $(( need / 1048576 )) MB (twice the PBF data). Free disk space or set SKIP_DISK_CHECK=1." >&2
+        return 1
+    fi
+}
+
 build_index_into() {
     target_dir="$1"
     files=$(list_pbfs)
@@ -83,18 +135,50 @@ build_index_into() {
         echo "Error: no PBF files found in $DATA_DIR/pbf/" >&2
         return 1
     fi
+    check_disk_space "$target_dir" || return 1
     rm -rf "$target_dir"
     mkdir -p "$target_dir"
     level_args=""
     [ -n "$STREET_LEVEL" ] && level_args="$level_args --street-level $STREET_LEVEL"
     [ -n "$ADMIN_LEVEL" ] && level_args="$level_args --admin-level $ADMIN_LEVEL"
+    [ "$INDEX_ALL_ROADS" = "true" ] && level_args="$level_args --all-roads"
     echo "Building index into $target_dir..."
     # shellcheck disable=SC2086
     build-index "$target_dir" $files $level_args || return 1
-    if [ ! -f "$target_dir/geo_cells.bin" ]; then
-        echo "Error: build-index finished but $target_dir/geo_cells.bin is missing" >&2
+    if ! index_is_current "$target_dir"; then
+        echo "Error: build-index finished but the index in $target_dir is incomplete" >&2
         return 1
     fi
+    # Every real extract has streets and strings; an empty one of these
+    # means build-index ran out of disk space and did not notice.
+    for f in geo_cells.bin strings.bin; do
+        if [ ! -s "$target_dir/$f" ]; then
+            echo "Error: $target_dir/$f is empty; build-index probably ran out of disk space" >&2
+            return 1
+        fi
+    done
+    # build-index writes geo_cells.bin early, so only this proves a staging
+    # dir left behind by a crash is whole.
+    : > "$target_dir/.complete" || return 1
+}
+
+# One build at a time per staging dir: a second builder (an `update`
+# container next to an `auto` one, or a second `build` by mistake) would
+# wipe the first one's staging dir and both would write into one. flock
+# is released by the kernel when the holder dies, so a killed build never
+# leaves a stale lock. Uses fd 9.
+acquire_build_lock() {
+    command -v flock >/dev/null 2>&1 || return 0
+    mkdir -p "$(dirname "$STAGING_DIR")"
+    exec 9>"$STAGING_DIR.lock" || return 1
+    if ! flock -n 9; then
+        echo "Error: another build is already running (lock $STAGING_DIR.lock is held); not starting a second one" >&2
+        exec 9>&-
+        return 1
+    fi
+}
+release_build_lock() {
+    exec 9>&- 2>/dev/null || true
 }
 
 # Build into $STAGING_DIR and swap it into $DATA_DIR/index. Every step is
@@ -103,18 +187,21 @@ build_index_into() {
 # auto-mode loop calls it. Returns 2 on any failure, leaving the live
 # index untouched.
 rebuild_and_swap() {
+    acquire_build_lock || return 2
     if ! build_index_into "$STAGING_DIR"; then
         echo "Index build failed; keeping the current index" >&2
         rm -rf "$STAGING_DIR"
+        release_build_lock
         return 2
     fi
 
-    # The server keeps its users/API keys in geocoder.json inside the
-    # index directory it was started with. A freshly built staging dir
-    # does not have it, so carry it over or every update logs everyone
-    # out and invalidates every key.
-    if [ -f "$DATA_DIR/index/geocoder.json" ]; then
-        cp -p "$DATA_DIR/index/geocoder.json" "$STAGING_DIR/geocoder.json" || return 2
+    # Users/API keys from an older layout are copied out of index/ now,
+    # not earlier: until this moment a server from the old image may
+    # still need them where they are (see migrate_geocoder_db).
+    if ! migrate_geocoder_db copy; then
+        echo "Could not copy geocoder.json out of the index folder; keeping the current index (the finished build stays in $STAGING_DIR)" >&2
+        release_build_lock
+        return 2
     fi
 
     # The previous index dir is kept as index.old so a running server
@@ -122,14 +209,16 @@ rebuild_and_swap() {
     # start of the next swap, not at the end of this one.
     rm -rf "$DATA_DIR/index.old"
     if [ -d "$DATA_DIR/index" ]; then
-        mv "$DATA_DIR/index" "$DATA_DIR/index.old" || return 2
+        mv "$DATA_DIR/index" "$DATA_DIR/index.old" || { release_build_lock; return 2; }
     fi
     if ! mv "$STAGING_DIR" "$DATA_DIR/index"; then
         echo "Swap failed; rolling back to the previous index" >&2
         [ -d "$DATA_DIR/index.old" ] && mv "$DATA_DIR/index.old" "$DATA_DIR/index"
+        release_build_lock
         return 2
     fi
     rm -f "$REBUILD_MARKER"
+    release_build_lock
     return 0
 }
 
@@ -138,25 +227,30 @@ rebuild_and_swap() {
 # a full copy. Promote it instead of rebuilding from scratch.
 recover_index() {
     [ -f "$DATA_DIR/index/geo_cells.bin" ] && return 0
-    if [ -f "$DATA_DIR/index.old/geo_cells.bin" ]; then
-        echo "No live index but index.old is complete; restoring it"
-        rm -rf "$DATA_DIR/index"
-        mv "$DATA_DIR/index.old" "$DATA_DIR/index"
-    elif [ -f "$STAGING_DIR/geo_cells.bin" ]; then
+    # A finished staging build is always the newest index (and the only
+    # one in the current format during an upgrade), so it wins over
+    # index.old; the next swap would delete it otherwise.
+    if [ -f "$STAGING_DIR/.complete" ]; then
         echo "No live index but a complete staging index exists; promoting it"
         rm -rf "$DATA_DIR/index"
-        mv "$STAGING_DIR" "$DATA_DIR/index"
+        mv "$STAGING_DIR" "$DATA_DIR/index" || return 2
+    elif [ -f "$DATA_DIR/index.old/geo_cells.bin" ]; then
+        echo "No live index but index.old is complete; restoring it"
+        rm -rf "$DATA_DIR/index"
+        mv "$DATA_DIR/index.old" "$DATA_DIR/index" || return 2
     fi
 }
 
 build_index() {
-    recover_index
-    if [ -f "$DATA_DIR/index/geo_cells.bin" ] && [ ! -f "$REBUILD_MARKER" ]; then
+    recover_index || return 2
+    if index_is_current "$DATA_DIR/index" && [ ! -f "$REBUILD_MARKER" ]; then
         echo "Index already exists, skipping build"
         return 0
     fi
     if [ -f "$REBUILD_MARKER" ]; then
         echo "PBF data changed since the index was built; rebuilding"
+    elif [ -f "$DATA_DIR/index/geo_cells.bin" ]; then
+        echo "Index was built by an older version and cannot be loaded; rebuilding"
     fi
     rebuild_and_swap || return $?
     echo "Index built."
@@ -378,7 +472,7 @@ do_update() {
         echo "No PBF files in $DATA_DIR/pbf/; running initial download"
         download_pbf
     fi
-    recover_index
+    recover_index || { echo "Update aborted" >&2; return 2; }
 
     # `|| pbf_rc=$?` keeps errexit happy on non-zero return without us
     # having to toggle set +e / set -e. Use a distinct variable name so
@@ -393,6 +487,8 @@ do_update() {
                 echo "All PBFs current, but a previous rebuild did not complete; rebuilding"
             elif [ ! -f "$DATA_DIR/index/geo_cells.bin" ]; then
                 echo "All PBFs current, but there is no index yet; building"
+            elif ! index_is_current "$DATA_DIR/index"; then
+                echo "All PBFs current, but the index was built by an older version; rebuilding"
             else
                 echo "All PBFs current; no rebuild needed"
                 echo "=== Update cycle complete (no-op) ==="
@@ -410,7 +506,7 @@ do_update() {
 }
 
 build_server_args() {
-    args="$DATA_DIR/index"
+    args="$DATA_DIR"
     if [ -n "$DOMAIN" ]; then
         args="$args --domain $DOMAIN"
         [ -n "$CACHE_DIR" ] && args="$args --cache $CACHE_DIR"
@@ -424,6 +520,7 @@ build_server_args() {
 }
 
 serve() {
+    migrate_geocoder_db move
     args=$(build_server_args)
     echo "Starting server..."
     # shellcheck disable=SC2086
@@ -480,6 +577,7 @@ serve_with_updates() {
         # block. Without this guard, `continue` paths would race a fresh
         # server against a still-alive one on port 3000 (AddrInUse).
         if [ -z "$SERVER_PID" ] || ! kill -0 "$SERVER_PID" 2>/dev/null; then
+            migrate_geocoder_db move
             echo "Launching server (background) for ${UPDATE_INTERVAL} cycle..."
             # shellcheck disable=SC2086
             query-server $args &
@@ -491,18 +589,26 @@ serve_with_updates() {
         # poll_sec rather than at the end of a multi-day sleep. A server
         # that dies takes the container down with its exit status, the
         # same as plain `serve` mode, so Docker's restart policy applies.
-        elapsed=0
-        while [ "$elapsed" -lt "$interval_sec" ]; do
-            sleep_interruptible "$poll_sec"
-            elapsed=$(( elapsed + poll_sec ))
-            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-                server_rc=0
-                wait "$SERVER_PID" 2>/dev/null || server_rc=$?
-                echo "Server exited unexpectedly (status $server_rc); stopping" >&2
-                SERVER_PID=""
-                exit "${server_rc:-1}"
-            fi
-        done
+        # When start-up found a rebuild pending (UPDATE_NOW), the first
+        # cycle runs right away instead: the server is already up on the
+        # existing index, so the rebuild costs no downtime.
+        if [ "${UPDATE_NOW:-0}" = 1 ]; then
+            UPDATE_NOW=0
+            echo "Running the pending rebuild now instead of waiting ${UPDATE_INTERVAL}"
+        else
+            elapsed=0
+            while [ "$elapsed" -lt "$interval_sec" ]; do
+                sleep_interruptible "$poll_sec"
+                elapsed=$(( elapsed + poll_sec ))
+                if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+                    server_rc=0
+                    wait "$SERVER_PID" 2>/dev/null || server_rc=$?
+                    echo "Server exited unexpectedly (status $server_rc); stopping" >&2
+                    SERVER_PID=""
+                    exit "${server_rc:-1}"
+                fi
+            done
+        fi
 
         # `if do_update; then ...` cleanly captures the return without
         # the `cmd || rc=$?` pattern leaking shell-global state. Note that
@@ -545,7 +651,23 @@ case "${1:-auto}" in
         ;;
     auto)
         download_pbf
-        build_index
+        recover_index || exit 2
+        # A loadable index with a rebuild pending (a PBF was replaced, or a
+        # previous cycle's build failed) is served as it is: rebuilding
+        # first would keep the server down for the whole build, which is
+        # days for a continent. With UPDATE_INTERVAL the first cycle runs
+        # at once and rebuilds in staging while serving. An index in the
+        # old format cannot be served by this image and is rebuilt first.
+        if index_is_current "$DATA_DIR/index" && [ -f "$REBUILD_MARKER" ]; then
+            if [ -n "$UPDATE_INTERVAL" ]; then
+                echo "PBF data changed since the index was built; serving the existing index while the first update cycle rebuilds it"
+                UPDATE_NOW=1
+            else
+                echo "Warning: PBF data changed since the index was built; serving the existing index. Run the update mode or set UPDATE_INTERVAL to rebuild." >&2
+            fi
+        else
+            build_index
+        fi
         if [ -n "$UPDATE_INTERVAL" ]; then
             serve_with_updates
         else

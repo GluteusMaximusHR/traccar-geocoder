@@ -1,19 +1,19 @@
 # Stage 1: Build C++ indexer
-FROM debian:bookworm-slim AS builder-cpp
+FROM debian:trixie-slim AS builder-cpp
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential cmake \
+    build-essential cmake ca-certificates \
     libosmium2-dev libprotozero-dev \
-    libs2-dev \
     zlib1g-dev libbz2-dev libexpat1-dev liblz4-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 COPY builder/ builder/
-RUN mkdir build && cd build && cmake ../builder && make -j$(nproc)
+RUN cmake -S builder -B build -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build -j$(nproc)
 
 # Stage 2: Build Rust server
-FROM rust:bookworm AS builder-rust
+FROM rust:trixie AS builder-rust
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
@@ -21,13 +21,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /src
 COPY server/ server/
-RUN cargo build --release --manifest-path server/Cargo.toml
+RUN cargo build --locked --release --manifest-path server/Cargo.toml
 
 # Stage 3: Runtime
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libs2-0 \
     zlib1g libbz2-1.0 libexpat1 liblz4-1 \
     curl ca-certificates \
     osmctools osmium-tool \
