@@ -16,15 +16,15 @@
 //! request counts per hour, index size and age, and the replication state
 //! written by the incremental-update workflow (`<STATE_DIR>/*.state.txt`).
 
-use axum::extract::Extension;
+use axum::extract::{Extension, State};
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
-use std::path::Path;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::auth::html_escape;
+use crate::auth::{self, html_escape, Db};
 
 // --- Request counting ---
 
@@ -83,8 +83,10 @@ pub struct Status {
     started: Instant,
     started_unix: u64,
     index_dir: String,
-    state_dir: Option<String>,
+    state_dir: String,
     update_interval: Option<String>,
+    /// `HEALTH_DETAILS=1`: serve the full `/health` body without a session.
+    health_details: bool,
     pub stats: Stats,
 }
 
@@ -104,20 +106,19 @@ pub struct DataInfo {
 }
 
 impl Status {
-    /// `index_dir` is where the `.bin` files live. The state directory comes
-    /// from `STATE_DIR` or, matching the Docker layout, `<index_dir>/../state`.
-    pub fn new(index_dir: &str) -> Self {
+    /// `index_dir` is where the `.bin` files live, `state_dir` where the
+    /// entrypoint writes `<basename>.state.txt`. Neither has to exist yet:
+    /// both are read on every request, so a state directory created by the
+    /// first incremental update shows up without a restart.
+    pub fn new(index_dir: &str, state_dir: &str) -> Self {
         let env = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-        let state_dir = env("STATE_DIR").or_else(|| {
-            let sibling = Path::new(index_dir).parent()?.join("state");
-            sibling.is_dir().then(|| sibling.to_string_lossy().into_owned())
-        });
         Self {
             started: Instant::now(),
             started_unix: now_unix(),
             index_dir: index_dir.to_string(),
-            state_dir,
+            state_dir: state_dir.to_string(),
             update_interval: env("UPDATE_INTERVAL"),
+            health_details: matches!(env("HEALTH_DETAILS").as_deref(), Some("1") | Some("true") | Some("yes")),
             stats: Stats::new(),
         }
     }
@@ -147,8 +148,7 @@ impl Status {
 
     pub fn data_info(&self) -> Vec<DataInfo> {
         let mut out = Vec::new();
-        let Some(dir) = &self.state_dir else { return out };
-        let Ok(entries) = std::fs::read_dir(dir) else { return out };
+        let Ok(entries) = std::fs::read_dir(&self.state_dir) else { return out };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             let Some(basename) = name.strip_suffix(".state.txt") else { continue };
@@ -257,7 +257,16 @@ impl Status {
 
 // --- /health ---
 
-pub async fn health(status: Extension<Arc<Status>>) -> Response {
+/// Liveness for monitoring. Unauthenticated callers get `status` and
+/// `version` only; the full picture (request counts, extract names, OSM
+/// timestamps, next update) needs a dashboard session or `HEALTH_DETAILS=1`.
+pub async fn health(headers: HeaderMap, db: State<Arc<RwLock<Db>>>, status: Extension<Arc<Status>>) -> Response {
+    let json_headers = [(axum::http::header::CONTENT_TYPE, "application/json")];
+    let detailed = status.health_details || auth::session_login(&headers, &db.read().unwrap()).is_some();
+    if !detailed {
+        let body = json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") });
+        return (json_headers, body.to_string()).into_response();
+    }
     let idx = status.index_info();
     let data: Vec<_> = status
         .data_info()
@@ -287,7 +296,7 @@ pub async fn health(status: Extension<Arc<Status>>) -> Response {
         "update_interval": status.update_interval,
         "next_update_unix": status.next_update_unix(),
     });
-    ([(axum::http::header::CONTENT_TYPE, "application/json")], body.to_string()).into_response()
+    (json_headers, body.to_string()).into_response()
 }
 
 // --- Formatting helpers (no chrono dependency) ---

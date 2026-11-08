@@ -244,6 +244,7 @@ cargo build --release --manifest-path server/Cargo.toml
 | `BRAND_FAVICON` | Path to the favicon. | logo, else a generic pin |
 | `BRAND_URL` | Link target of the header logo. | `/` |
 | `BRAND_FOOTER` | Footer text, e.g. your company name. | (none) |
+| `HEALTH_DETAILS` | `1` serves the full `/health` body (request counts, OSM data dates, next update) without a login; otherwise it needs a dashboard session. | (unset) |
 
 ## Incremental updates
 

@@ -45,6 +45,13 @@ A missing or unreadable file is reported at startup and ignored; the page
 falls back to the default for that item. `BRAND_COLOR` is restricted to
 plain colour syntax so a stray `;` cannot leak into the stylesheet.
 
+The files behind `BRAND_LOGO`, `BRAND_LOGO_DARK` and `BRAND_FAVICON` are
+served to anyone who can reach the server, without a login, so only ever
+point them at images meant to be public (never at `geocoder.json` or other
+private files). They are sent with `X-Content-Type-Options: nosniff` and a
+deny-all `Content-Security-Policy`, so an SVG with embedded script is shown
+as an image but cannot run on the dashboard's origin.
+
 A complete, real-world example lives in [`deploy/inteling/`](../deploy/inteling/).
 
 ## Logo tips
@@ -80,10 +87,21 @@ A complete, real-world example lives in [`deploy/inteling/`](../deploy/inteling/
 
 ## `/health`
 
-The same status is available unauthenticated as JSON for monitoring:
+A liveness endpoint for monitoring. Without a login it returns only:
 
 ```bash
 curl -s http://localhost:3000/health
+# {"status":"ok","version":"0.1.0"}
+```
+
+The full picture (request counts, extract names, OSM timestamps, the time of
+the next scheduled update) is returned when the request carries a valid
+dashboard session cookie, or for everyone when the server is started with
+`HEALTH_DETAILS=1`. Set that only where `/health` is not reachable from the
+public internet, or when you are fine with that information being visible:
+
+```bash
+curl -s -b "session=..." http://localhost:3000/health
 ```
 
 ```json
@@ -104,4 +122,17 @@ curl -s http://localhost:3000/health
 ```
 
 `requests_last_24h` is oldest first; the last element is the current hour.
-`data` is empty until the first incremental update has written a state file.
+`data` is empty until the first incremental update has written a state file
+(`STATE_DIR`, by default the `state` directory next to the index); the
+directory is read on every request, so it appears without a restart.
+
+## Security notes
+
+- The session cookie is `HttpOnly; SameSite=Lax`, plus `Secure` when the
+  server terminates TLS itself (`--domain`). `SameSite=Lax` keeps the cookie
+  off cross-site form posts, so a hostile page cannot create users or keys
+  with an admin's session. Behind a TLS-terminating reverse proxy the cookie
+  is not marked `Secure`; keep the proxy-to-server hop on a private network.
+- All state-changing actions (create/delete key, create/delete user, change
+  password) are `POST` forms.
+- Logins may not contain `:` or `/` and are at most 64 characters.

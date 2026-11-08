@@ -961,7 +961,11 @@ async fn main() {
     let branding = Arc::new(branding::Branding::from_env());
     eprintln!("Branding: {}", branding.describe());
     let pages = Arc::new(branding.render_pages(auth::LOGIN_HTML, auth::DASHBOARD_HTML));
-    let status = Arc::new(status::Status::new(&index_dir));
+    // Replication state written by the entrypoint: STATE_DIR, else
+    // <data_dir>/state next to the index.
+    let state_dir = std::env::var("STATE_DIR").ok().filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| format!("{}/state", data_dir));
+    let status = Arc::new(status::Status::new(&index_dir, &state_dir));
 
     let app = Router::new()
         .route("/reverse", get(reverse_geocode))
@@ -980,6 +984,7 @@ async fn main() {
     let domain_pos = args.iter().position(|a| a == "--domain");
     if let Some(pos) = domain_pos {
         let domain = args.get(pos + 1).expect("--domain requires a value").clone();
+        auth::SECURE_COOKIES.store(true, std::sync::atomic::Ordering::Relaxed);
         let cache_dir = args.iter().position(|a| a == "--cache")
             .and_then(|p| args.get(p + 1).cloned())
             .unwrap_or_else(|| "acme-cache".to_string());

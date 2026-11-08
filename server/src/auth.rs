@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::fs;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -152,12 +152,37 @@ fn get_session_cookie(headers: &HeaderMap) -> Option<String> {
         .find_map(|s| s.strip_prefix("session=").map(|v| v.to_string()))
 }
 
+/// Set by `main` when the server terminates TLS itself (`--domain` mode), so
+/// the session cookie also carries the `Secure` attribute.
+pub static SECURE_COOKIES: AtomicBool = AtomicBool::new(false);
+
+fn cookie_attrs() -> &'static str {
+    // SameSite=Lax keeps the cookie off cross-site POSTs, so a hostile page
+    // cannot submit the dashboard forms with the admin's session.
+    if SECURE_COOKIES.load(Relaxed) {
+        "; Path=/; HttpOnly; SameSite=Lax; Secure"
+    } else {
+        "; Path=/; HttpOnly; SameSite=Lax"
+    }
+}
+
 fn set_session_cookie(value: &str) -> ([(axum::http::header::HeaderName, String); 1],) {
-    ([(SET_COOKIE, format!("session={}; Path=/; HttpOnly", value))],)
+    ([(SET_COOKIE, format!("session={}{}", value, cookie_attrs()))],)
 }
 
 fn clear_session_cookie() -> ([(axum::http::header::HeaderName, String); 1],) {
-    ([(SET_COOKIE, "session=; Path=/; HttpOnly; Max-Age=0".to_string())],)
+    ([(SET_COOKIE, format!("session={}; Max-Age=0", cookie_attrs()))],)
+}
+
+/// Login of the session named by the request's cookie, if it is valid.
+pub(crate) fn session_login(headers: &HeaderMap, db: &Db) -> Option<String> {
+    get_session_cookie(headers).and_then(|id| db.sessions.get(&id).cloned())
+}
+
+/// Logins are used as rate-limiter keys (`login` or `login:<ip>`) and in
+/// URLs, so keep them unambiguous.
+fn valid_login(login: &str) -> bool {
+    !login.is_empty() && login.len() <= 64 && !login.contains(':') && !login.contains('/') && login.trim() == login
 }
 
 // --- Router ---
@@ -169,9 +194,9 @@ pub fn router() -> Router<Arc<RwLock<Db>>> {
         .route("/logout", get(logout))
         .route("/password", post(change_password))
         .route("/tokens", post(create_token))
-        .route("/tokens/{token}/delete", get(delete_token))
+        .route("/tokens/{token}/delete", post(delete_token))
         .route("/users", post(create_user_handler))
-        .route("/users/{login}/delete", get(delete_user))
+        .route("/users/{login}/delete", post(delete_user))
 }
 
 // --- Handlers ---
@@ -196,7 +221,7 @@ async fn login_submit(state: State<Arc<RwLock<Db>>>, pages: Extension<Arc<Pages>
     let mut db = state.write().unwrap();
 
     // First login ever — create admin account
-    if db.users.is_empty() {
+    if db.users.is_empty() && valid_login(&form.login) {
         db.create_user(&form.login, &form.password, true, 0, 0, false);
     }
 
@@ -281,7 +306,8 @@ async fn dashboard(
             "<tr><td><code data-key=\"{t}\">{t}</code></td>\
              <td class=\"actions\">\
              <button type=\"button\" class=\"btn ghost sm\" data-copy=\"{t}\" onclick=\"copyText(this)\">Copy</button> \
-             <a class=\"btn danger sm\" href=\"/tokens/{t}/delete\" onclick=\"return confirm('Delete this API key? Clients using it will get 401.')\">Delete</a>\
+             <form method=\"post\" action=\"/tokens/{t}/delete\" class=\"inline\" onsubmit=\"return confirm('Delete this API key? Clients using it will get 401.')\">\
+             <button type=\"submit\" class=\"btn danger sm\">Delete</button></form>\
              </td></tr>",
         ));
     }
@@ -296,10 +322,13 @@ async fn dashboard(
         for (ulogin, user) in users {
             let role = if user.admin { "Admin" } else { "User" };
             let delete = if ulogin != &login {
+                // The login goes into a data attribute and the JS builds the
+                // message from it, so no JS quoting rules apply.
                 format!(
-                    "<a class=\"btn danger sm\" href=\"/users/{}/delete\" onclick=\"return confirm('Delete user {} and all of their API keys?')\">Delete</a>",
+                    "<form method=\"post\" action=\"/users/{0}/delete\" class=\"inline\" data-login=\"{0}\" \
+                     onsubmit=\"return confirm('Delete user ' + this.dataset.login + ' and all of their API keys?')\">\
+                     <button type=\"submit\" class=\"btn danger sm\">Delete</button></form>",
                     html_escape(ulogin),
-                    html_escape(&ulogin.replace('\'', "\\'")),
                 )
             } else {
                 String::new()
@@ -390,7 +419,7 @@ async fn create_user_handler(headers: HeaderMap, state: State<Arc<RwLock<Db>>>, 
     let mut db = state.write().unwrap();
     if let Some(login) = db.sessions.get(&session_id).cloned() {
         let is_admin = db.users.get(&login).map(|u| u.admin).unwrap_or(false);
-        if is_admin && !form.login.is_empty() && !form.password.is_empty() {
+        if is_admin && valid_login(&form.login) && !form.password.is_empty() {
             db.create_user(&form.login, &form.password, false, form.rate_per_second, form.rate_per_day, form.rate_by_ip.as_deref() == Some("on"));
         }
     }

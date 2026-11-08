@@ -28,13 +28,14 @@
 //! | `BRAND_FAVICON`   | Path to the favicon (default: the logo, or the pin)       |
 //! | `BRAND_FOOTER`    | Plain-text footer line, e.g. the operator's company name  |
 //!
-//! Files are read into memory and served from `/brand/logo`,
-//! `/brand/logo-dark` and `/brand/favicon`. The HTML templates contain
+//! Files are read into memory and served, unauthenticated, from `/brand/logo`,
+//! `/brand/logo-dark` and `/brand/favicon`, so the variables must only ever
+//! point at files meant to be public. The HTML templates contain
 //! `{brand_*}` placeholders that are filled once, at startup.
 
 use axum::body::Bytes;
 use axum::extract::Extension;
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+use axum::http::header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -215,8 +216,15 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
 
 fn serve(asset: Option<&Asset>) -> Response {
     match asset {
+        // nosniff + a deny-all CSP: an operator-supplied SVG is an image here,
+        // never a document that could run script on this origin.
         Some(a) => (
-            [(CONTENT_TYPE, a.mime), (CACHE_CONTROL, "public, max-age=3600")],
+            [
+                (CONTENT_TYPE, a.mime),
+                (CACHE_CONTROL, "public, max-age=3600"),
+                (X_CONTENT_TYPE_OPTIONS, "nosniff"),
+                (CONTENT_SECURITY_POLICY, "default-src 'none'; style-src 'unsafe-inline'"),
+            ],
             a.bytes.clone(),
         )
             .into_response(),
