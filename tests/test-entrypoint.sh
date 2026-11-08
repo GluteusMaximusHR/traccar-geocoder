@@ -388,6 +388,19 @@ new_data; run_ep update STUB_OSMUPDATE_RC=0 STUB_BUILD_NO_PLACE=1
 check "incomplete build: exit 2" [ "$RC" = 2 ]
 check "incomplete build: not swapped" file_is "$DATA/index/geo_cells.bin" "old-index"
 
+echo "# 20. recovery: only a finished staging build is promoted"
+new_data without-index; mkdir "$DATA/index.staging"; echo partial > "$DATA/index.staging/geo_cells.bin"
+run_ep build
+check "partial staging: exit 0" [ "$RC" = 0 ]
+check "partial staging: not promoted" not_grep_log "promoting it"
+check "partial staging: rebuilt" not file_is "$DATA/index/geo_cells.bin" partial
+new_data without-index; mkdir "$DATA/index.staging"
+echo finished > "$DATA/index.staging/geo_cells.bin"; echo finished > "$DATA/index.staging/place_cells.bin"
+: > "$DATA/index.staging/.complete"
+run_ep build
+check "finished staging: promoted" grep_log "promoting it"
+check "finished staging: live" file_is "$DATA/index/geo_cells.bin" finished
+
 echo
 echo "$CHECKS checks, $FAILS failed"
 [ "$FAILS" -eq 0 ]

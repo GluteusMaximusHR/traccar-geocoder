@@ -111,6 +111,9 @@ build_index_into() {
         echo "Error: build-index finished but the index in $target_dir is incomplete" >&2
         return 1
     fi
+    # build-index writes geo_cells.bin early, so only this proves a staging
+    # dir left behind by a crash is whole.
+    : > "$target_dir/.complete" || return 1
 }
 
 # Build into $STAGING_DIR and swap it into $DATA_DIR/index. Every step is
@@ -150,7 +153,7 @@ recover_index() {
         echo "No live index but index.old is complete; restoring it"
         rm -rf "$DATA_DIR/index"
         mv "$DATA_DIR/index.old" "$DATA_DIR/index"
-    elif [ -f "$STAGING_DIR/geo_cells.bin" ]; then
+    elif [ -f "$STAGING_DIR/.complete" ]; then
         echo "No live index but a complete staging index exists; promoting it"
         rm -rf "$DATA_DIR/index"
         mv "$STAGING_DIR" "$DATA_DIR/index"
