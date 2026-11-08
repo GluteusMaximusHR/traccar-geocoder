@@ -315,6 +315,29 @@ check "restart logged" grep_log "Restarting server against new index"
 check "server launched twice" [ "$(grep -c '^query-server pid=' "$STUB_LOG")" -ge 2 ]
 check "geocoder.json survived the swap" file_is "$DATA/geocoder.json" "$DB"
 
+echo "# 12b. auto: a pending rebuild is served through, not waited for"
+new_data; mkdir -p "$DATA/state"; : > "$DATA/state/rebuild-pending"
+env UPDATE_INTERVAL=30 sh "$ENTRYPOINT" auto > "$LOG" 2>&1 &
+EP=$!
+sleep 4
+check "server launched before any build" [ "$(head -1 "$STUB_LOG" | cut -d' ' -f1)" = query-server ]
+check "rebuild ran at once, not after the interval" stub_called_with "^build-index"
+check "logged" grep_log "serving the existing index while the first update cycle"
+check "marker cleared" [ ! -f "$DATA/state/rebuild-pending" ]
+check "server restarted against the new index" grep_log "Restarting server against new index"
+check "index rebuilt" not file_is "$DATA/index/geo_cells.bin" "old-index"
+check "only one immediate cycle" [ "$(grep -c 'Running the pending rebuild now' "$LOG")" = 1 ]
+kill -TERM "$EP"; wait "$EP" 2>/dev/null
+new_data; mkdir -p "$DATA/state"; : > "$DATA/state/rebuild-pending"; run_ep auto STUB_SERVER_DIE=1
+check "no interval: serves with a warning" grep_log "Run the update mode or set UPDATE_INTERVAL"
+check "no interval: server started" stub_called_with "^query-server"
+check "no interval: no build" not stub_called_with "^build-index"
+check "no interval: marker kept" [ -f "$DATA/state/rebuild-pending" ]
+new_data; old_format; legacy_db; mkdir -p "$DATA/state"; : > "$DATA/state/rebuild-pending"; run_ep auto STUB_SERVER_DIE=1
+check "old format: still rebuilt before serving" [ "$(head -1 "$STUB_LOG" | cut -d' ' -f1)" = build-index ]
+new_data without-index; run_ep auto STUB_SERVER_DIE=1
+check "no index: built before serving" [ "$(head -1 "$STUB_LOG" | cut -d' ' -f1)" = build-index ]
+
 echo "# 13. auto loop: server death ends the container with the server's status"
 new_data
 env UPDATE_INTERVAL=30 STUB_SERVER_DIE=1 sh "$ENTRYPOINT" auto > "$LOG" 2>&1 &

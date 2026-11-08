@@ -589,18 +589,26 @@ serve_with_updates() {
         # poll_sec rather than at the end of a multi-day sleep. A server
         # that dies takes the container down with its exit status, the
         # same as plain `serve` mode, so Docker's restart policy applies.
-        elapsed=0
-        while [ "$elapsed" -lt "$interval_sec" ]; do
-            sleep_interruptible "$poll_sec"
-            elapsed=$(( elapsed + poll_sec ))
-            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-                server_rc=0
-                wait "$SERVER_PID" 2>/dev/null || server_rc=$?
-                echo "Server exited unexpectedly (status $server_rc); stopping" >&2
-                SERVER_PID=""
-                exit "${server_rc:-1}"
-            fi
-        done
+        # When start-up found a rebuild pending (UPDATE_NOW), the first
+        # cycle runs right away instead: the server is already up on the
+        # existing index, so the rebuild costs no downtime.
+        if [ "${UPDATE_NOW:-0}" = 1 ]; then
+            UPDATE_NOW=0
+            echo "Running the pending rebuild now instead of waiting ${UPDATE_INTERVAL}"
+        else
+            elapsed=0
+            while [ "$elapsed" -lt "$interval_sec" ]; do
+                sleep_interruptible "$poll_sec"
+                elapsed=$(( elapsed + poll_sec ))
+                if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+                    server_rc=0
+                    wait "$SERVER_PID" 2>/dev/null || server_rc=$?
+                    echo "Server exited unexpectedly (status $server_rc); stopping" >&2
+                    SERVER_PID=""
+                    exit "${server_rc:-1}"
+                fi
+            done
+        fi
 
         # `if do_update; then ...` cleanly captures the return without
         # the `cmd || rc=$?` pattern leaking shell-global state. Note that
@@ -643,7 +651,23 @@ case "${1:-auto}" in
         ;;
     auto)
         download_pbf
-        build_index
+        recover_index || exit 2
+        # A loadable index with a rebuild pending (a PBF was replaced, or a
+        # previous cycle's build failed) is served as it is: rebuilding
+        # first would keep the server down for the whole build, which is
+        # days for a continent. With UPDATE_INTERVAL the first cycle runs
+        # at once and rebuilds in staging while serving. An index in the
+        # old format cannot be served by this image and is rebuilt first.
+        if index_is_current "$DATA_DIR/index" && [ -f "$REBUILD_MARKER" ]; then
+            if [ -n "$UPDATE_INTERVAL" ]; then
+                echo "PBF data changed since the index was built; serving the existing index while the first update cycle rebuilds it"
+                UPDATE_NOW=1
+            else
+                echo "Warning: PBF data changed since the index was built; serving the existing index. Run the update mode or set UPDATE_INTERVAL to rebuild." >&2
+            fi
+        else
+            build_index
+        fi
         if [ -n "$UPDATE_INTERVAL" ]; then
             serve_with_updates
         else

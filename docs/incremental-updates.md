@@ -25,6 +25,14 @@ against the same volume as your serve container; the swap is safe with a
 running server (see below). For a single-container, no-external-scheduler
 setup, use `auto` + `UPDATE_INTERVAL`.
 
+`auto` never blocks on a rebuild it can avoid. If the container starts (or
+restarts) while a loadable index exists but a rebuild is pending, because a
+PBF was replaced or a previous cycle's build failed, the server comes up on
+the existing index right away; with `UPDATE_INTERVAL` the first cycle runs
+immediately and rebuilds in staging while serving, without it a warning asks
+you to run `update`. Only a missing index, or one in a format this image
+cannot load, is built before the server starts.
+
 Exit codes of `update`: `0` success or nothing to do, `2` the cycle was
 aborted and the live index was left untouched, `143` interrupted by SIGTERM.
 
