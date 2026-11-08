@@ -151,7 +151,7 @@ Status codes:
 
 ### Authentication
 
-The server includes a web dashboard for managing API keys. On first launch, navigate to the server URL in a browser to create an admin account. Once logged in, you can generate API keys and create additional users with configurable rate limits.
+The server includes a web dashboard for managing API keys. On first launch, navigate to the server URL in a browser to create an admin account. Once logged in, you can generate API keys, create additional users with configurable rate limits, send test requests, and see usage and index status. The dashboard works offline and can carry your own name, colour and logo via the `BRAND_*` variables below; see [docs/branding.md](docs/branding.md). `GET /health` returns the same server status as JSON for monitoring.
 
 ## Architecture
 
@@ -237,6 +237,13 @@ cargo build --release --manifest-path server/Cargo.toml
 | `FORCE_REDOWNLOAD` | Re-download every PBF on next launch (overrides the basename cache). | (unset) |
 | `CHECK_PBF_FRESHNESS` | Use `curl -z` to refresh only if the server's Last-Modified is newer. | (unset) |
 | `REPLICATION_BASE_URL_<basename>` | Replication URL for a PBF whose header lacks `osmosis_replication_base_url` and that has no state file yet (non-alphanumerics in the basename become underscores). Without a known URL the PBF is skipped rather than updated from planet. | (unset) |
+| `BRAND_NAME` | Product name shown in the web UI. | `Geocoder` |
+| `BRAND_COLOR` | Accent colour of the web UI (any plain CSS colour). | `#4f6ee0` |
+| `BRAND_LOGO` | Path to a logo image for the web UI header (served at `/brand/logo`). | (none) |
+| `BRAND_LOGO_DARK` | Logo variant for dark colour schemes. | (none) |
+| `BRAND_FAVICON` | Path to the favicon. | logo, else a generic pin |
+| `BRAND_URL` | Link target of the header logo. | `/` |
+| `BRAND_FOOTER` | Footer text, e.g. your company name. | (none) |
 
 ## Incremental updates
 
