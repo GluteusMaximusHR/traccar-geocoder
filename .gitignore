@@ -2,3 +2,4 @@ build/
 target/
 test-output/
 *.osm.pbf
+test-data/
