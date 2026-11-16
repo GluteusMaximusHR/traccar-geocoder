@@ -205,14 +205,27 @@ serving, and switch immediately afterwards:
 #    image has no lock): recreate it without UPDATE_INTERVAL for the duration
 # 2. pre-build with the new image; the old container keeps answering
 docker run --rm -v geocoder-data:/data -e PBF_URLS="$PBF_URLS" <new-image> build
-# 3. switch
+# 3. switch as soon as the pre-build has printed "Index built."
 docker stop geocoder && docker rm geocoder   # then start the new image
 ```
 
-Between the pre-build's swap and the switch, do not change users or API keys
-in the old dashboard: the new server reads the copy in `$DATA_DIR`. Before the
-swap nothing has moved, so an old container that restarts during the build is
-unaffected.
+**The pre-build swaps the new index into place by itself when it finishes.**
+From that moment the old container keeps answering only because it still has
+the old index files open. Until the switch, do not restart or recreate it and
+do not reboot the host: an old server that starts now opens the new-format
+`index/`, which it was not built to read, and finds no `geocoder.json` there,
+so it comes up with an empty user database in which the first login creates
+the admin account. A build that takes days will rarely finish while someone
+is watching, so either chain the switch to the build (`... build && docker
+stop geocoder && ...`) or check the pre-build's log regularly and switch as
+soon as it ends with `Index built.`. If the old container did restart in
+that window, switch at once, or put the old index back with the rollback
+command below.
+
+Also between the pre-build's swap and the switch, do not change users or API
+keys in the old dashboard: the new server reads the copy in `$DATA_DIR`.
+Before the swap nothing has moved, so an old container that restarts during
+the build is unaffected.
 
 Rolling back to the old image means putting the old index back; its
 `geocoder.json` is still inside it. This only works until the next update
