@@ -377,19 +377,51 @@ async fn dashboard(
 
     let daily_usage = requests_today(&limiter, &login);
 
-    let html = pages
-        .dashboard
-        .replace("{user}", &html_escape(&login))
-        .replace("{rows}", &rows)
-        .replace("{user_rows}", &user_rows)
-        .replace("{daily_usage}", &daily_usage.to_string())
-        .replace("{key_count}", &tokens.len().to_string())
-        .replace("{osm_date}", &status.osm_date_html())
-        .replace("{uptime}", &status.uptime_html())
-        .replace("{hour_bars}", &status.hour_bars_html())
-        .replace("{info_rows}", &status.info_rows_html())
-        .replace("{users_display}", if is_admin { "" } else { "display:none" });
+    let html = fill_template(
+        &pages.dashboard,
+        &[
+            ("user", &html_escape(&login)),
+            ("rows", &rows),
+            ("user_rows", &user_rows),
+            ("daily_usage", &daily_usage.to_string()),
+            ("key_count", &tokens.len().to_string()),
+            ("osm_date", &status.osm_date_html()),
+            ("uptime", &status.uptime_html()),
+            ("hour_bars", &status.hour_bars_html()),
+            ("info_rows", &status.info_rows_html()),
+            ("users_display", if is_admin { "" } else { "display:none" }),
+        ],
+    );
     Html(html).into_response()
+}
+
+/// Replaces every `{name}` in `template` whose name is in `vars`, in a single
+/// pass. Inserted values are never scanned again, so text a user typed (a key
+/// note, a login) that happens to contain `{uptime}` or `{rows}` stays as it
+/// is. Braces that are not a known placeholder, such as in inline JS and CSS,
+/// are kept.
+fn fill_template(template: &str, vars: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(template.len() + vars.iter().map(|(_, v)| v.len()).sum::<usize>());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let value = after
+            .find('}')
+            .and_then(|close| vars.iter().find(|(name, _)| *name == &after[..close]).map(|(name, v)| (name.len(), v)));
+        match value {
+            Some((name_len, v)) => {
+                out.push_str(v);
+                rest = &after[name_len + 1..];
+            }
+            None => {
+                out.push('{');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 #[derive(Deserialize)]
@@ -530,3 +562,36 @@ pub(crate) fn html_escape(s: &str) -> String {
 /// Page templates; `Branding::render_pages` fills the `{brand_*}` placeholders at startup.
 pub const LOGIN_HTML: &str = include_str!("web/login.html");
 pub const DASHBOARD_HTML: &str = include_str!("web/dashboard.html");
+
+#[cfg(test)]
+mod tests {
+    use super::fill_template;
+
+    #[test]
+    fn fills_every_occurrence() {
+        assert_eq!(fill_template("<{a}|{b}|{a}>", &[("a", "1"), ("b", "2")]), "<1|2|1>");
+    }
+
+    #[test]
+    fn keeps_unknown_braces() {
+        let js = "function f() { if (x) { return {}; } } {nope} {";
+        assert_eq!(fill_template(js, &[("a", "1")]), js);
+        assert_eq!(fill_template("{ {a}", &[("a", "1")]), "{ 1");
+    }
+
+    #[test]
+    fn does_not_expand_inserted_values() {
+        let out = fill_template("<{rows}><{uptime}>", &[("rows", "note {uptime} {rows}"), ("uptime", "3d")]);
+        assert_eq!(out, "<note {uptime} {rows}><3d>");
+    }
+
+    #[test]
+    fn dashboard_has_no_unfilled_placeholders() {
+        let names = ["user", "rows", "user_rows", "daily_usage", "key_count", "osm_date", "uptime", "hour_bars", "info_rows", "users_display"];
+        let vars: Vec<(&str, &str)> = names.iter().map(|n| (*n, "")).collect();
+        let html = fill_template(super::DASHBOARD_HTML, &vars);
+        for n in names {
+            assert!(!html.contains(&format!("{{{}}}", n)), "{{{}}} left in the dashboard", n);
+        }
+    }
+}
