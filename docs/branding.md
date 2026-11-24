@@ -68,7 +68,7 @@ A complete, real-world example lives in [`deploy/inteling/`](../deploy/inteling/
 
 ## What the dashboard shows
 
-- **API keys** of the signed-in user, with copy and delete buttons.
+- **API keys** of the signed-in user, each with an editable note (for example the company using it), and copy and delete buttons.
 - **Try it**: a form that calls `/reverse` or `/snap` on this server with one
   of your keys and shows the JSON, the status code, the latency and a link to
   the spot on OpenStreetMap. Nothing is stored server-side.

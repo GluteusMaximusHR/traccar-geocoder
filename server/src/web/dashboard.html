@@ -24,10 +24,10 @@
     <section class="card">
       <div class="head">
         <div><h2>API keys</h2><p class="sub">Pass a key as <code>?key=</code> on <code>/reverse</code> and <code>/snap</code>.</p></div>
-        <form method="post" action="/tokens"><button type="submit" class="btn">+ Create key</button></form>
+        <form method="post" action="/tokens" class="new-key"><input type="text" name="note" maxlength="100" placeholder="Company / note (optional)" aria-label="Note for the new key"><button type="submit" class="btn">+ Create key</button></form>
       </div>
       <table id="keys">
-        <thead><tr><th>Key</th><th></th></tr></thead>
+        <thead><tr><th>Company / note</th><th>Key</th><th></th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </section>
@@ -101,9 +101,18 @@
       var ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select();
       try { document.execCommand('copy'); done(); } catch (e) {} document.body.removeChild(ta);
     }
-    var keys = Array.prototype.map.call(document.querySelectorAll('#keys code[data-key]'), function (c) { return c.getAttribute('data-key'); });
+    function noteChanged(input) {
+      input.form.querySelector('button').hidden = input.value.trim() === input.getAttribute('data-saved');
+    }
+    var keyEls = document.querySelectorAll('#keys code[data-key]');
+    var keys = Array.prototype.map.call(keyEls, function (c) { return c.getAttribute('data-key'); });
     var keySel = document.getElementById('try-key');
-    keys.forEach(function (k) { var o = document.createElement('option'); o.value = k; o.textContent = k.slice(0, 8) + '…' + k.slice(-4); keySel.appendChild(o); });
+    Array.prototype.forEach.call(keyEls, function (c) {
+      var k = c.getAttribute('data-key'), note = c.getAttribute('data-note');
+      var o = document.createElement('option'); o.value = k;
+      o.textContent = (note ? note + ' · ' : '') + k.slice(0, 8) + '…' + k.slice(-4);
+      keySel.appendChild(o);
+    });
     if (!keys.length) { var o = document.createElement('option'); o.value = ''; o.textContent = 'create a key first'; keySel.appendChild(o); document.getElementById('try-btn').disabled = true; }
     if (keys.length) {
       var base = location.origin;

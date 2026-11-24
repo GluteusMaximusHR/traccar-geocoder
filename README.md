@@ -151,7 +151,7 @@ Status codes:
 
 ### Authentication
 
-The server includes a web dashboard for managing API keys. On first launch, navigate to the server URL in a browser to create an admin account. Once logged in, you can generate API keys, create additional users with configurable rate limits, send test requests, and see usage and index status. The dashboard works offline and can carry your own name, colour and logo via the `BRAND_*` variables below; see [docs/branding.md](docs/branding.md). `GET /health` returns the same server status as JSON for monitoring.
+The server includes a web dashboard for managing API keys. On first launch, navigate to the server URL in a browser to create an admin account. Once logged in, you can generate API keys and label each one with a note (for example the company using it), create additional users with configurable rate limits, send test requests, and see usage and index status. The dashboard works offline and can carry your own name, colour and logo via the `BRAND_*` variables below; see [docs/branding.md](docs/branding.md). `GET /health` returns the same server status as JSON for monitoring.
 
 ## Architecture
 

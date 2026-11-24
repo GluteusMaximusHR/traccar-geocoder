@@ -63,6 +63,11 @@ input, select { width: 100%; font: inherit; font-size: 14px; color: var(--text);
 input:focus, select:focus { outline: 2px solid color-mix(in srgb, var(--brand) 45%, transparent); border-color: var(--brand); }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; align-items: end; }
 form.inline { display: inline; }
+form.new-key { display: flex; gap: 8px; align-items: center; }
+form.new-key input { width: 230px; }
+form.note-form { display: flex; gap: 6px; align-items: center; }
+form.note-form input { padding: 5px 8px; min-width: 140px; }
+td.note { width: 34%; }
 
 /* tables */
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
@@ -112,5 +117,7 @@ details .grid { margin-top: 12px; }
   .top .right .who { display: none; }
   .card { padding: 16px; }
   td.actions .btn span { display: none; }
+  form.new-key input { width: 100%; }
+  td.note { width: auto; }
   .stat { min-width: 120px; }
 }

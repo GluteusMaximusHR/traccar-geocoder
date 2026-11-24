@@ -1,3 +1,4 @@
+use axum::extract::rejection::FormRejection;
 use axum::extract::{Extension, Form, Path, State};
 use axum::http::header::SET_COOKIE;
 use axum::http::HeaderMap;
@@ -52,6 +53,11 @@ pub type RateLimiter = RwLock<HashMap<String, Arc<RateState>>>;
 pub struct Db {
     users: HashMap<String, User>,
     tokens: HashMap<String, String>, // token -> login
+    /// token -> free-text note (e.g. the company using the key). Kept apart
+    /// from `tokens` so older builds, which ignore unknown fields, can still
+    /// read this file.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    token_notes: HashMap<String, String>,
     #[serde(skip)]
     sessions: HashMap<String, String>, // session_id -> login (in-memory only)
     #[serde(skip)]
@@ -132,6 +138,15 @@ pub fn check_rate(limiter: &RateLimiter, login: &str, rate_per_second: u32, rate
     Ok(())
 }
 
+/// Longest note kept for an API key, in characters.
+const MAX_NOTE_CHARS: usize = 100;
+
+/// Trims a key note, drops control characters and caps its length.
+fn clean_note(note: &str) -> String {
+    let kept: String = note.trim().chars().filter(|c| !c.is_control()).take(MAX_NOTE_CHARS).collect();
+    kept.trim_end().to_string()
+}
+
 fn random_hex(len: usize) -> String {
     let mut bytes = vec![0u8; len];
     getrandom::fill(&mut bytes).expect("getrandom failed");
@@ -194,6 +209,7 @@ pub fn router() -> Router<Arc<RwLock<Db>>> {
         .route("/logout", get(logout))
         .route("/password", post(change_password))
         .route("/tokens", post(create_token))
+        .route("/tokens/{token}/note", post(set_token_note))
         .route("/tokens/{token}/delete", post(delete_token))
         .route("/users", post(create_user_handler))
         .route("/users/{login}/delete", post(delete_user))
@@ -297,13 +313,24 @@ async fn dashboard(
 
     let is_admin = db.users.get(&login).map(|u| u.admin).unwrap_or(false);
 
-    let mut tokens: Vec<&String> = db.tokens.iter().filter(|(_, owner)| *owner == &login).map(|(t, _)| t).collect();
-    tokens.sort();
+    let mut tokens: Vec<(&String, &str)> = db
+        .tokens
+        .iter()
+        .filter(|(_, owner)| *owner == &login)
+        .map(|(t, _)| (t, db.token_notes.get(t).map(String::as_str).unwrap_or("")))
+        .collect();
+    // Keys with a note first, alphabetically by note; then the rest by key.
+    tokens.sort_by_key(|(t, note)| (note.is_empty(), note.to_lowercase(), *t));
     let mut rows = String::new();
-    for token in &tokens {
+    for (token, note) in &tokens {
         let t = html_escape(token);
+        let n = html_escape(note);
         rows.push_str(&format!(
-            "<tr><td><code data-key=\"{t}\">{t}</code></td>\
+            "<tr><td class=\"note\"><form method=\"post\" action=\"/tokens/{t}/note\" class=\"note-form\">\
+             <input type=\"text\" name=\"note\" value=\"{n}\" maxlength=\"{MAX_NOTE_CHARS}\" placeholder=\"Company / note\" \
+             aria-label=\"Note for this key\" data-saved=\"{n}\" oninput=\"noteChanged(this)\">\
+             <button type=\"submit\" class=\"btn ghost sm\" hidden>Save</button></form></td>\
+             <td><code data-key=\"{t}\" data-note=\"{n}\">{t}</code></td>\
              <td class=\"actions\">\
              <button type=\"button\" class=\"btn ghost sm\" data-copy=\"{t}\" onclick=\"copyText(this)\">Copy</button> \
              <form method=\"post\" action=\"/tokens/{t}/delete\" class=\"inline\" onsubmit=\"return confirm('Delete this API key? Clients using it will get 401.')\">\
@@ -312,7 +339,7 @@ async fn dashboard(
         ));
     }
     if tokens.is_empty() {
-        rows.push_str("<tr><td class=\"empty\" colspan=\"2\">No API keys yet.</td></tr>");
+        rows.push_str("<tr><td class=\"empty\" colspan=\"3\">No API keys yet.</td></tr>");
     }
 
     let mut user_rows = String::new();
@@ -365,7 +392,19 @@ async fn dashboard(
     Html(html).into_response()
 }
 
-async fn create_token(headers: HeaderMap, state: State<Arc<RwLock<Db>>>) -> Response {
+#[derive(Deserialize)]
+struct NoteForm {
+    #[serde(default)]
+    note: String,
+}
+
+/// `POST /tokens`, optionally with a `note` form field. A bare POST without a
+/// form body (as older clients and scripts send it) still creates a key.
+async fn create_token(
+    headers: HeaderMap,
+    state: State<Arc<RwLock<Db>>>,
+    form: Result<Form<NoteForm>, FormRejection>,
+) -> Response {
     let session_id = match get_session_cookie(&headers) {
         Some(s) => s,
         None => return Redirect::to("/login").into_response(),
@@ -374,8 +413,38 @@ async fn create_token(headers: HeaderMap, state: State<Arc<RwLock<Db>>>) -> Resp
     let mut db = state.write().unwrap();
     if let Some(login) = db.sessions.get(&session_id).cloned() {
         let token = random_hex(16);
+        let note = form.map(|Form(f)| clean_note(&f.note)).unwrap_or_default();
+        if !note.is_empty() {
+            db.token_notes.insert(token.clone(), note);
+        }
         db.tokens.insert(token, login);
         db.save();
+    }
+    Redirect::to("/").into_response()
+}
+
+async fn set_token_note(
+    headers: HeaderMap,
+    state: State<Arc<RwLock<Db>>>,
+    Path(token): Path<String>,
+    Form(form): Form<NoteForm>,
+) -> Response {
+    let session_id = match get_session_cookie(&headers) {
+        Some(s) => s,
+        None => return Redirect::to("/login").into_response(),
+    };
+
+    let mut db = state.write().unwrap();
+    if let Some(login) = db.sessions.get(&session_id) {
+        if db.tokens.get(&token).map(|o| o == login).unwrap_or(false) {
+            let note = clean_note(&form.note);
+            if note.is_empty() {
+                db.token_notes.remove(&token);
+            } else {
+                db.token_notes.insert(token, note);
+            }
+            db.save();
+        }
     }
     Redirect::to("/").into_response()
 }
@@ -394,6 +463,7 @@ async fn delete_token(
     if let Some(login) = db.sessions.get(&session_id) {
         if db.tokens.get(&token).map(|o| o == login).unwrap_or(false) {
             db.tokens.remove(&token);
+            db.token_notes.remove(&token);
             db.save();
         }
     }
@@ -442,6 +512,8 @@ async fn delete_user(
         if is_admin && target != login {
             db.users.remove(&target);
             db.tokens.retain(|_, owner| owner != &target);
+            let Db { tokens, token_notes, .. } = &mut *db;
+            token_notes.retain(|t, _| tokens.contains_key(t));
             db.save();
         }
     }
